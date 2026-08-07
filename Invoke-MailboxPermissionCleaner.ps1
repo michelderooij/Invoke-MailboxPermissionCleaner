@@ -245,7 +245,15 @@ function Write-LogEntry {
 
     $row | Export-Csv -Path $script:LogPath -Append -NoTypeInformation -Encoding UTF8
 
-    $verboseMsg = "[{0}] Mailbox={1} | Permission={2} | Trustee={3} | Action={4} | Success={5}" -f $row.Timestamp, $row.MailboxDisplayName, $row.PermissionType, $row.TrusteeOriginal, $row.RemovedAction, $row.Success
+    $verboseArgs = @(
+        $row.Timestamp
+        $row.MailboxDisplayName
+        $row.PermissionType
+        $row.TrusteeOriginal
+        $row.RemovedAction
+        $row.Success
+    )
+    $verboseMsg = "[{0}] Mailbox={1} | Permission={2} | Trustee={3} | Action={4} | Success={5}" -f $verboseArgs
     Write-Verbose $verboseMsg
 }
 
@@ -544,7 +552,14 @@ function Remove-FullAccessPermissions {
 
         if ($PSCmdlet.ShouldProcess($spDescription, 'Remove-MailboxPermission')) {
             try {
-                Remove-MailboxPermission -Identity $Mailbox.Identity -User $trusteeRaw -AccessRights FullAccess -Confirm:$false -ErrorAction Stop
+                $removeMailboxPermissionParams = @{
+                    Identity     = $Mailbox.Identity
+                    User         = $trusteeRaw
+                    AccessRights = 'FullAccess'
+                    Confirm      = $false
+                    ErrorAction  = 'Stop'
+                }
+                Remove-MailboxPermission @removeMailboxPermissionParams
                 $entry['RemovedAction'] = 'Removed'
                 $entry['Success']       = $true
                 $entry['ErrorMessage']  = ''
@@ -638,7 +653,14 @@ function Remove-SendAsPermissions {
 
         if ($PSCmdlet.ShouldProcess($spDescription, 'Remove-ADPermission')) {
             try {
-                Remove-ADPermission -Identity $Mailbox.Identity -User $trusteeRaw -ExtendedRights 'Send-As' -Confirm:$false -ErrorAction Stop
+                $removeAdPermissionParams = @{
+                    Identity       = $Mailbox.Identity
+                    User           = $trusteeRaw
+                    ExtendedRights = 'Send-As'
+                    Confirm        = $false
+                    ErrorAction    = 'Stop'
+                }
+                Remove-ADPermission @removeAdPermissionParams
                 $entry['RemovedAction'] = 'Removed'
                 $entry['Success']       = $true
                 $entry['ErrorMessage']  = ''
@@ -710,7 +732,13 @@ function Remove-SendOnBehalfPermissions {
 
         if ($PSCmdlet.ShouldProcess($spDescription, 'Set-Mailbox')) {
             try {
-                Set-Mailbox -Identity $Mailbox.Identity -GrantSendOnBehalfTo @{ Remove = $trusteeRaw } -Confirm:$false -ErrorAction Stop
+                $setMailboxParams = @{
+                    Identity            = $Mailbox.Identity
+                    GrantSendOnBehalfTo = @{ Remove = $trusteeRaw }
+                    Confirm             = $false
+                    ErrorAction         = 'Stop'
+                }
+                Set-Mailbox @setMailboxParams
                 $entry['RemovedAction'] = 'Removed'
                 $entry['Success']       = $true
                 $entry['ErrorMessage']  = ''
@@ -812,7 +840,13 @@ function Remove-CalendarPermissions {
 
         if ($PSCmdlet.ShouldProcess($spDescription, 'Remove-MailboxFolderPermission')) {
             try {
-                Remove-MailboxFolderPermission -Identity $calPath -User $trusteeRaw -Confirm:$false -ErrorAction Stop
+                $removeCalendarPermissionParams = @{
+                    Identity    = $calPath
+                    User        = $trusteeRaw
+                    Confirm     = $false
+                    ErrorAction = 'Stop'
+                }
+                Remove-MailboxFolderPermission @removeCalendarPermissionParams
                 $entry['RemovedAction'] = 'Removed'
                 $entry['Success']       = $true
                 $entry['ErrorMessage']  = ''
@@ -842,7 +876,12 @@ Write-Verbose ("Log file: {0}" -f $LogPath)
 Write-Verbose "Retrieving mailboxes..."
 
 try {
-    $allMailboxes = @(Get-Mailbox -ResultSize $ResultSize -RecipientTypeDetails UserMailbox -ErrorAction Stop)
+    $getMailboxParams = @{
+        ResultSize           = $ResultSize
+        RecipientTypeDetails = 'UserMailbox'
+        ErrorAction          = 'Stop'
+    }
+    $allMailboxes = @(Get-Mailbox @getMailboxParams)
 }
 catch {
     throw ("Failed to retrieve mailboxes: {0}" -f $_.Exception.Message)
@@ -855,7 +894,12 @@ Write-Verbose ("Found {0} UserMailbox recipients." -f $total)
 
 foreach ($mbx in $allMailboxes) {
     $current++
-    Write-Progress -Activity 'Invoke-MailboxPermissionCleaner' -Status ("Processing {0} of {1}: {2}" -f $current, $total, $mbx.PrimarySmtpAddress) -PercentComplete (($current / $total) * 100)
+    $progressParams = @{
+        Activity        = 'Invoke-MailboxPermissionCleaner'
+        Status          = ("Processing {0} of {1}: {2}" -f $current, $total, $mbx.PrimarySmtpAddress)
+        PercentComplete = ($current / $total) * 100
+    }
+    Write-Progress @progressParams
 
     Write-Verbose ("[{0}/{1}] Checking: {2}" -f $current, $total, $mbx.PrimarySmtpAddress)
 
@@ -902,9 +946,15 @@ foreach ($mbx in $allMailboxes) {
         ErrorMessage               = ''
     }
 
+    $permissionParams = @{
+        Mailbox         = $mbx
+        BaseEntry       = $baseEntry
+        OwnerIsDisabled = $ownerDisabled
+    }
+
     if ($FullAccess) {
         try {
-            Remove-FullAccessPermissions -Mailbox $mbx -BaseEntry $baseEntry -OwnerIsDisabled $ownerDisabled -IncludeOrphan ([bool]$Orphan)
+            Remove-FullAccessPermissions @permissionParams -IncludeOrphan ([bool]$Orphan)
         }
         catch {
             Write-Warning ("Unexpected error in Remove-FullAccessPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
@@ -913,7 +963,7 @@ foreach ($mbx in $allMailboxes) {
 
     if ($SendAs) {
         try {
-            Remove-SendAsPermissions -Mailbox $mbx -BaseEntry $baseEntry -OwnerIsDisabled $ownerDisabled -IncludeOrphan ([bool]$Orphan)
+            Remove-SendAsPermissions @permissionParams -IncludeOrphan ([bool]$Orphan)
         }
         catch {
             Write-Warning ("Unexpected error in Remove-SendAsPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
@@ -922,7 +972,7 @@ foreach ($mbx in $allMailboxes) {
 
     if ($SendOnBehalfOf) {
         try {
-            Remove-SendOnBehalfPermissions -Mailbox $mbx -BaseEntry $baseEntry -OwnerIsDisabled $ownerDisabled
+            Remove-SendOnBehalfPermissions @permissionParams
         }
         catch {
             Write-Warning ("Unexpected error in Remove-SendOnBehalfPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
@@ -931,7 +981,7 @@ foreach ($mbx in $allMailboxes) {
 
     if ($Calendar) {
         try {
-            Remove-CalendarPermissions -Mailbox $mbx -BaseEntry $baseEntry -OwnerIsDisabled $ownerDisabled -IncludeOrphan ([bool]$Orphan)
+            Remove-CalendarPermissions @permissionParams -IncludeOrphan ([bool]$Orphan)
         }
         catch {
             Write-Warning ("Unexpected error in Remove-CalendarPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
