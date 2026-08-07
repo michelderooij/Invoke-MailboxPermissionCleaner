@@ -245,9 +245,15 @@ function Write-LogEntry {
 
     $row | Export-Csv -Path $script:LogPath -Append -NoTypeInformation -Encoding UTF8
 
-    $verboseMsg = "[{0}] Mailbox={1} | Permission={2} | Trustee={3} | Action={4} | Success={5}" -f `
-        $row.Timestamp, $row.MailboxDisplayName, $row.PermissionType, $row.TrusteeOriginal,
-        $row.RemovedAction, $row.Success
+    $verboseArgs = @(
+        $row.Timestamp
+        $row.MailboxDisplayName
+        $row.PermissionType
+        $row.TrusteeOriginal
+        $row.RemovedAction
+        $row.Success
+    )
+    $verboseMsg = "[{0}] Mailbox={1} | Permission={2} | Trustee={3} | Action={4} | Success={5}" -f $verboseArgs
     Write-Verbose $verboseMsg
 }
 
@@ -355,13 +361,11 @@ function Resolve-Trustee {
     else {
         try {
             # Try SamAccountName first, then SID, then DN
-            $adUser = Get-ADUser -Filter { SamAccountName -eq $identity } `
-                                 -Properties UserPrincipalName -ErrorAction Stop |
-                      Select-Object -First 1
+            $adUser = Get-ADUser -Filter { SamAccountName -eq $identity } -Properties UserPrincipalName -ErrorAction Stop |
+                Select-Object -First 1
 
             if (-not $adUser) {
-                $adUser = Get-ADUser -Identity $identity `
-                                     -Properties UserPrincipalName -ErrorAction Stop
+                $adUser = Get-ADUser -Identity $identity -Properties UserPrincipalName -ErrorAction Stop
             }
             $script:ADUserCache[$identity] = $adUser
         }
@@ -413,10 +417,9 @@ function Get-CalendarFolderPath {
     }
 
     try {
-        $calFolder = Get-MailboxFolderStatistics -Identity $MailboxIdentity `
-                         -ErrorAction Stop |
-                     Where-Object { $_.FolderType -eq 'Calendar' } |
-                     Select-Object -First 1
+        $calFolder = Get-MailboxFolderStatistics -Identity $MailboxIdentity -ErrorAction Stop |
+            Where-Object { $_.FolderType -eq 'Calendar' } |
+            Select-Object -First 1
 
         if ($calFolder) {
             # FolderPath is like "/Calendar" or "/Kalender" etc.
@@ -428,8 +431,7 @@ function Get-CalendarFolderPath {
         }
     }
     catch {
-        Write-Warning ("Could not retrieve folder statistics for '{0}': {1}" -f `
-            $MailboxIdentity, $_.Exception.Message)
+        Write-Warning ("Could not retrieve folder statistics for '{0}': {1}" -f $MailboxIdentity, $_.Exception.Message)
     }
 
     $script:CalendarCache[$MailboxIdentity] = $null
@@ -463,9 +465,7 @@ function Get-MailboxOwnerADUser {
     }
 
     try {
-        $adUser = Get-ADUser -Identity $SamAccountName `
-                             -Properties Enabled, UserPrincipalName `
-                             -ErrorAction Stop
+        $adUser = Get-ADUser -Identity $SamAccountName -Properties Enabled, UserPrincipalName -ErrorAction Stop
         $script:ADUserCache[$SamAccountName] = $adUser
         return $adUser
     }
@@ -524,8 +524,7 @@ function Remove-FullAccessPermissions {
             }
     }
     catch {
-        Write-Warning ("Get-MailboxPermission failed for '{0}': {1}" -f `
-            $Mailbox.PrimarySmtpAddress, $_.Exception.Message)
+        Write-Warning ("Get-MailboxPermission failed for '{0}': {1}" -f $Mailbox.PrimarySmtpAddress, $_.Exception.Message)
         return
     }
 
@@ -549,14 +548,18 @@ function Remove-FullAccessPermissions {
         $entry['PermissionType']     = 'FullAccess'
         $entry['Reason']             = $reason
 
-        $spDescription = "Remove Full Access for '{0}' on mailbox '{1}'" -f `
-            $trusteeRaw, $Mailbox.PrimarySmtpAddress
+        $spDescription = "Remove Full Access for '{0}' on mailbox '{1}'" -f $trusteeRaw, $Mailbox.PrimarySmtpAddress
 
         if ($PSCmdlet.ShouldProcess($spDescription, 'Remove-MailboxPermission')) {
             try {
-                Remove-MailboxPermission -Identity $Mailbox.Identity `
-                    -User $trusteeRaw -AccessRights FullAccess `
-                    -Confirm:$false -ErrorAction Stop
+                $removeMailboxPermissionParams = @{
+                    Identity     = $Mailbox.Identity
+                    User         = $trusteeRaw
+                    AccessRights = 'FullAccess'
+                    Confirm      = $false
+                    ErrorAction  = 'Stop'
+                }
+                Remove-MailboxPermission @removeMailboxPermissionParams
                 $entry['RemovedAction'] = 'Removed'
                 $entry['Success']       = $true
                 $entry['ErrorMessage']  = ''
@@ -565,8 +568,7 @@ function Remove-FullAccessPermissions {
                 $entry['RemovedAction'] = 'Failed'
                 $entry['Success']       = $false
                 $entry['ErrorMessage']  = $_.Exception.Message
-                Write-Warning ("Failed to remove Full Access for '{0}' on '{1}': {2}" -f `
-                    $trusteeRaw, $Mailbox.PrimarySmtpAddress, $_.Exception.Message)
+                Write-Warning ("Failed to remove Full Access for '{0}' on '{1}': {2}" -f $trusteeRaw, $Mailbox.PrimarySmtpAddress, $_.Exception.Message)
             }
         }
         else {
@@ -623,8 +625,7 @@ function Remove-SendAsPermissions {
             }
     }
     catch {
-        Write-Warning ("Get-ADPermission failed for '{0}': {1}" -f `
-            $Mailbox.PrimarySmtpAddress, $_.Exception.Message)
+        Write-Warning ("Get-ADPermission failed for '{0}': {1}" -f $Mailbox.PrimarySmtpAddress, $_.Exception.Message)
         return
     }
 
@@ -648,14 +649,18 @@ function Remove-SendAsPermissions {
         $entry['PermissionType']     = 'SendAs'
         $entry['Reason']             = $reason
 
-        $spDescription = "Remove Send As for '{0}' on mailbox '{1}'" -f `
-            $trusteeRaw, $Mailbox.PrimarySmtpAddress
+        $spDescription = "Remove Send As for '{0}' on mailbox '{1}'" -f $trusteeRaw, $Mailbox.PrimarySmtpAddress
 
         if ($PSCmdlet.ShouldProcess($spDescription, 'Remove-ADPermission')) {
             try {
-                Remove-ADPermission -Identity $Mailbox.Identity `
-                    -User $trusteeRaw -ExtendedRights 'Send-As' `
-                    -Confirm:$false -ErrorAction Stop
+                $removeAdPermissionParams = @{
+                    Identity       = $Mailbox.Identity
+                    User           = $trusteeRaw
+                    ExtendedRights = 'Send-As'
+                    Confirm        = $false
+                    ErrorAction    = 'Stop'
+                }
+                Remove-ADPermission @removeAdPermissionParams
                 $entry['RemovedAction'] = 'Removed'
                 $entry['Success']       = $true
                 $entry['ErrorMessage']  = ''
@@ -664,8 +669,7 @@ function Remove-SendAsPermissions {
                 $entry['RemovedAction'] = 'Failed'
                 $entry['Success']       = $false
                 $entry['ErrorMessage']  = $_.Exception.Message
-                Write-Warning ("Failed to remove Send As for '{0}' on '{1}': {2}" -f `
-                    $trusteeRaw, $Mailbox.PrimarySmtpAddress, $_.Exception.Message)
+                Write-Warning ("Failed to remove Send As for '{0}' on '{1}': {2}" -f $trusteeRaw, $Mailbox.PrimarySmtpAddress, $_.Exception.Message)
             }
         }
         else {
@@ -724,14 +728,17 @@ function Remove-SendOnBehalfPermissions {
         $entry['PermissionType']     = 'SendOnBehalf'
         $entry['Reason']             = 'Disabled mailbox owner account - Send On Behalf cleanup'
 
-        $spDescription = "Remove Send On Behalf delegate '{0}' from mailbox '{1}'" -f `
-            $trusteeRaw, $Mailbox.PrimarySmtpAddress
+        $spDescription = "Remove Send On Behalf delegate '{0}' from mailbox '{1}'" -f $trusteeRaw, $Mailbox.PrimarySmtpAddress
 
         if ($PSCmdlet.ShouldProcess($spDescription, 'Set-Mailbox')) {
             try {
-                Set-Mailbox -Identity $Mailbox.Identity `
-                    -GrantSendOnBehalfTo @{ Remove = $trusteeRaw } `
-                    -Confirm:$false -ErrorAction Stop
+                $setMailboxParams = @{
+                    Identity            = $Mailbox.Identity
+                    GrantSendOnBehalfTo = @{ Remove = $trusteeRaw }
+                    Confirm             = $false
+                    ErrorAction         = 'Stop'
+                }
+                Set-Mailbox @setMailboxParams
                 $entry['RemovedAction'] = 'Removed'
                 $entry['Success']       = $true
                 $entry['ErrorMessage']  = ''
@@ -740,8 +747,7 @@ function Remove-SendOnBehalfPermissions {
                 $entry['RemovedAction'] = 'Failed'
                 $entry['Success']       = $false
                 $entry['ErrorMessage']  = $_.Exception.Message
-                Write-Warning ("Failed to remove Send On Behalf for '{0}' on '{1}': {2}" -f `
-                    $trusteeRaw, $Mailbox.PrimarySmtpAddress, $_.Exception.Message)
+                Write-Warning ("Failed to remove Send On Behalf for '{0}' on '{1}': {2}" -f $trusteeRaw, $Mailbox.PrimarySmtpAddress, $_.Exception.Message)
             }
         }
         else {
@@ -789,12 +795,10 @@ function Remove-CalendarPermissions {
 
     Write-Verbose ("  Processing Calendar permissions for: {0}" -f $Mailbox.PrimarySmtpAddress)
 
-    $calPath = Get-CalendarFolderPath -MailboxIdentity $Mailbox.Identity `
-                                      -MailboxAlias $Mailbox.Alias
+    $calPath = Get-CalendarFolderPath -MailboxIdentity $Mailbox.Identity -MailboxAlias $Mailbox.Alias
 
     if (-not $calPath) {
-        Write-Warning ("Could not determine calendar folder path for '{0}'. Skipping." -f `
-            $Mailbox.PrimarySmtpAddress)
+        Write-Warning ("Could not determine calendar folder path for '{0}'. Skipping." -f $Mailbox.PrimarySmtpAddress)
         return
     }
 
@@ -808,8 +812,7 @@ function Remove-CalendarPermissions {
             }
     }
     catch {
-        Write-Warning ("Get-MailboxFolderPermission failed for '{0}': {1}" -f `
-            $calPath, $_.Exception.Message)
+        Write-Warning ("Get-MailboxFolderPermission failed for '{0}': {1}" -f $calPath, $_.Exception.Message)
         return
     }
 
@@ -833,13 +836,17 @@ function Remove-CalendarPermissions {
         $entry['PermissionType']     = 'CalendarPermission'
         $entry['Reason']             = $reason
 
-        $spDescription = "Remove Calendar permission for '{0}' on '{1}'" -f `
-            $trusteeRaw, $calPath
+        $spDescription = "Remove Calendar permission for '{0}' on '{1}'" -f $trusteeRaw, $calPath
 
         if ($PSCmdlet.ShouldProcess($spDescription, 'Remove-MailboxFolderPermission')) {
             try {
-                Remove-MailboxFolderPermission -Identity $calPath `
-                    -User $trusteeRaw -Confirm:$false -ErrorAction Stop
+                $removeCalendarPermissionParams = @{
+                    Identity    = $calPath
+                    User        = $trusteeRaw
+                    Confirm     = $false
+                    ErrorAction = 'Stop'
+                }
+                Remove-MailboxFolderPermission @removeCalendarPermissionParams
                 $entry['RemovedAction'] = 'Removed'
                 $entry['Success']       = $true
                 $entry['ErrorMessage']  = ''
@@ -848,8 +855,7 @@ function Remove-CalendarPermissions {
                 $entry['RemovedAction'] = 'Failed'
                 $entry['Success']       = $false
                 $entry['ErrorMessage']  = $_.Exception.Message
-                Write-Warning ("Failed to remove Calendar permission for '{0}' on '{1}': {2}" -f `
-                    $trusteeRaw, $calPath, $_.Exception.Message)
+                Write-Warning ("Failed to remove Calendar permission for '{0}' on '{1}': {2}" -f $trusteeRaw, $calPath, $_.Exception.Message)
             }
         }
         else {
@@ -870,9 +876,12 @@ Write-Verbose ("Log file: {0}" -f $LogPath)
 Write-Verbose "Retrieving mailboxes..."
 
 try {
-    $allMailboxes = @(Get-Mailbox -ResultSize $ResultSize `
-                                  -RecipientTypeDetails UserMailbox `
-                                  -ErrorAction Stop)
+    $getMailboxParams = @{
+        ResultSize           = $ResultSize
+        RecipientTypeDetails = 'UserMailbox'
+        ErrorAction          = 'Stop'
+    }
+    $allMailboxes = @(Get-Mailbox @getMailboxParams)
 }
 catch {
     throw ("Failed to retrieve mailboxes: {0}" -f $_.Exception.Message)
@@ -885,9 +894,12 @@ Write-Verbose ("Found {0} UserMailbox recipients." -f $total)
 
 foreach ($mbx in $allMailboxes) {
     $current++
-    Write-Progress -Activity 'Invoke-MailboxPermissionCleaner' `
-                   -Status ("Processing {0} of {1}: {2}" -f $current, $total, $mbx.PrimarySmtpAddress) `
-                   -PercentComplete (($current / $total) * 100)
+    $progressParams = @{
+        Activity        = 'Invoke-MailboxPermissionCleaner'
+        Status          = ("Processing {0} of {1}: {2}" -f $current, $total, $mbx.PrimarySmtpAddress)
+        PercentComplete = ($current / $total) * 100
+    }
+    Write-Progress @progressParams
 
     Write-Verbose ("[{0}/{1}] Checking: {2}" -f $current, $total, $mbx.PrimarySmtpAddress)
 
@@ -934,47 +946,45 @@ foreach ($mbx in $allMailboxes) {
         ErrorMessage               = ''
     }
 
+    $permissionParams = @{
+        Mailbox         = $mbx
+        BaseEntry       = $baseEntry
+        OwnerIsDisabled = $ownerDisabled
+    }
+
     if ($FullAccess) {
         try {
-            Remove-FullAccessPermissions -Mailbox $mbx -BaseEntry $baseEntry `
-                -OwnerIsDisabled $ownerDisabled -IncludeOrphan ([bool]$Orphan)
+            Remove-FullAccessPermissions @permissionParams -IncludeOrphan ([bool]$Orphan)
         }
         catch {
-            Write-Warning ("Unexpected error in Remove-FullAccessPermissions for '{0}': {1}" -f `
-                $mbx.PrimarySmtpAddress, $_.Exception.Message)
+            Write-Warning ("Unexpected error in Remove-FullAccessPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
         }
     }
 
     if ($SendAs) {
         try {
-            Remove-SendAsPermissions -Mailbox $mbx -BaseEntry $baseEntry `
-                -OwnerIsDisabled $ownerDisabled -IncludeOrphan ([bool]$Orphan)
+            Remove-SendAsPermissions @permissionParams -IncludeOrphan ([bool]$Orphan)
         }
         catch {
-            Write-Warning ("Unexpected error in Remove-SendAsPermissions for '{0}': {1}" -f `
-                $mbx.PrimarySmtpAddress, $_.Exception.Message)
+            Write-Warning ("Unexpected error in Remove-SendAsPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
         }
     }
 
     if ($SendOnBehalfOf) {
         try {
-            Remove-SendOnBehalfPermissions -Mailbox $mbx -BaseEntry $baseEntry `
-                -OwnerIsDisabled $ownerDisabled
+            Remove-SendOnBehalfPermissions @permissionParams
         }
         catch {
-            Write-Warning ("Unexpected error in Remove-SendOnBehalfPermissions for '{0}': {1}" -f `
-                $mbx.PrimarySmtpAddress, $_.Exception.Message)
+            Write-Warning ("Unexpected error in Remove-SendOnBehalfPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
         }
     }
 
     if ($Calendar) {
         try {
-            Remove-CalendarPermissions -Mailbox $mbx -BaseEntry $baseEntry `
-                -OwnerIsDisabled $ownerDisabled -IncludeOrphan ([bool]$Orphan)
+            Remove-CalendarPermissions @permissionParams -IncludeOrphan ([bool]$Orphan)
         }
         catch {
-            Write-Warning ("Unexpected error in Remove-CalendarPermissions for '{0}': {1}" -f `
-                $mbx.PrimarySmtpAddress, $_.Exception.Message)
+            Write-Warning ("Unexpected error in Remove-CalendarPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
         }
     }
 }
