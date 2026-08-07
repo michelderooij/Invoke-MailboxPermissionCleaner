@@ -4,17 +4,30 @@
 <#
 .SYNOPSIS
     Removes mailbox-related permissions from Exchange mailboxes whose Active Directory
-    owner account is disabled.
+    owner account is disabled, and optionally removes orphaned (SID-only) permissions
+    from all mailboxes.
 
 .DESCRIPTION
     Invoke-MailboxPermissionCleaner enumerates all UserMailbox recipients in an Exchange
-    on-premises environment. For each mailbox whose owner Active Directory account is
-    disabled, it removes:
+    on-premises environment.  It operates in two complementary modes:
 
-      - Full Access permissions  (Get-MailboxPermission / Remove-MailboxPermission)
-      - Send As permissions      (Get-ADPermission / Remove-ADPermission)
-      - Send On Behalf entries   (Set-Mailbox -GrantSendOnBehalfTo)
-      - Calendar folder perms    (Get-MailboxFolderPermission / Remove-MailboxFolderPermission)
+    Disabled-owner mode (always active)
+    ------------------------------------
+    For each mailbox whose owner Active Directory account is disabled, it removes the
+    permission types selected by the -FullAccess, -SendAs, -SendOnBehalfOf, and
+    -Calendar switches.
+
+    Orphan mode (-Orphan switch)
+    ----------------------------
+    For EVERY mailbox (regardless of owner state), any permission entry whose trustee
+    resolves to an unresolvable SID-like value (e.g. "S-1-5-21-...") is treated as an
+    orphaned permission – the original account no longer exists in AD or Exchange – and
+    is automatically removed.  The -FullAccess, -SendAs, and -Calendar switches still
+    gate which permission types are inspected; orphan handling is an additional reason
+    to remove, not a separate set of cmdlets.
+
+    When none of -FullAccess, -SendAs, -SendOnBehalfOf, or -Calendar are specified, the
+    script behaves as if all four were specified (backward-compatible default).
 
     The script is designed for production use in large Exchange on-premises environments.
     It uses in-memory hashtable caches so that every AD/Exchange lookup is performed at
@@ -35,6 +48,25 @@
 .PARAMETER ResultSize
     Maximum number of mailboxes returned by Get-Mailbox.  Defaults to 'Unlimited'.
 
+.PARAMETER FullAccess
+    Process Full Access permissions.  If none of the permission-type switches are
+    specified, all four types are processed (default behaviour).
+
+.PARAMETER SendAs
+    Process Send As permissions.  See -FullAccess for default behaviour.
+
+.PARAMETER SendOnBehalfOf
+    Process Send On Behalf Of permissions.  See -FullAccess for default behaviour.
+
+.PARAMETER Calendar
+    Process Calendar folder permissions.  See -FullAccess for default behaviour.
+
+.PARAMETER Orphan
+    Additionally remove any permission entry whose trustee cannot be resolved (i.e.
+    appears as a raw SID such as "S-1-5-21-...") across ALL mailboxes, regardless of
+    whether the mailbox owner's account is disabled.  Combined with the permission-type
+    switches to limit which permission types are inspected for orphans.
+
 .PARAMETER WhatIf
     Simulates all removal operations without making changes.  Log entries are still
     written with RemovedAction = "WhatIf".
@@ -45,12 +77,24 @@
 .EXAMPLE
     .\Invoke-MailboxPermissionCleaner.ps1
 
-    Runs against all mailboxes, logs to a timestamped CSV in the current directory.
+    Runs against all mailboxes with all permission types (default), logs to a
+    timestamped CSV in the current directory.
 
 .EXAMPLE
     .\Invoke-MailboxPermissionCleaner.ps1 -WhatIf -Verbose
 
     Simulates all removals with verbose output.  No changes are made.
+
+.EXAMPLE
+    .\Invoke-MailboxPermissionCleaner.ps1 -FullAccess -Calendar -Orphan
+
+    Removes Full Access and Calendar permissions from disabled-owner mailboxes AND
+    removes orphaned SID entries from those same permission types on all mailboxes.
+
+.EXAMPLE
+    .\Invoke-MailboxPermissionCleaner.ps1 -Orphan -FullAccess -WhatIf -Verbose
+
+    Simulates orphan Full Access removal across all mailboxes.
 
 .EXAMPLE
     .\Invoke-MailboxPermissionCleaner.ps1 -LogPath C:\Logs\cleanup.csv -ResultSize 500
@@ -59,7 +103,7 @@
 
 .NOTES
     Author  : Invoke-MailboxPermissionCleaner
-    Version : 1.0.0
+    Version : 1.1.0
     Requires: Exchange Management Shell, ActiveDirectory module, PowerShell 5.1+
 
     Caching Architecture
@@ -74,6 +118,16 @@
     Every external lookup first checks the relevant cache.  A sentinel value
     (__NOT_FOUND__) is stored for failed lookups so that the external call is not
     retried on subsequent occurrences of the same trustee.
+
+    Orphan SID Detection
+    --------------------
+    A trustee is considered orphaned when:
+      1. It matches the SID pattern (^S-1-\d+-\d+(-\d+)+$), OR
+      2. It looks like DOMAIN\S-1-... after domain-prefix stripping, OR
+      3. All resolution attempts (Get-Recipient, Get-ADUser) fail AND the raw value
+         contains only SID-like characters.
+    Orphaned entries are removed regardless of the mailbox owner's account state when
+    -Orphan is specified.
 
     Localized Calendar Discovery
     ----------------------------
@@ -93,7 +147,8 @@
          SMTP address).
       3. Falls back to Get-ADUser with a -Filter on SamAccountName, DistinguishedName,
          SID, or UserPrincipalName.
-      4. Returns a PSCustomObject with OriginalValue and ResolvedUPN properties.
+      4. Returns a PSCustomObject with OriginalValue, ResolvedUPN, and IsOrphanSid
+         properties.
       5. Stores the result (or sentinel) in the cache.
 
     WhatIf / Confirm Implementation
@@ -115,11 +170,36 @@ param (
     [string]$LogPath = (Join-Path -Path (Get-Location) -ChildPath ("MailboxPermissionCleaner_{0}.csv" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))),
 
     [Parameter()]
-    [string]$ResultSize = 'Unlimited'
+    [string]$ResultSize = 'Unlimited',
+
+    [Parameter()]
+    [switch]$FullAccess,
+
+    [Parameter()]
+    [switch]$SendAs,
+
+    [Parameter()]
+    [switch]$SendOnBehalfOf,
+
+    [Parameter()]
+    [switch]$Calendar,
+
+    [Parameter()]
+    [switch]$Orphan
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
+
+# Promote LogPath to script scope so that Write-LogEntry (a nested function) can access it
+$script:LogPath = $LogPath
+$anyTypeSwitch = $FullAccess -or $SendAs -or $SendOnBehalfOf -or $Calendar
+if (-not $anyTypeSwitch) {
+    $FullAccess      = $true
+    $SendAs          = $true
+    $SendOnBehalfOf  = $true
+    $Calendar        = $true
+}
 
 #region --- Cache initialisation ---------------------------------------------------
 
@@ -175,13 +255,43 @@ function Write-LogEntry {
 
 #region --- Trustee resolution -----------------------------------------------------
 
+function Test-IsOrphanSid {
+    <#
+    .SYNOPSIS
+        Returns $true when the supplied string looks like an unresolvable SID.
+    .DESCRIPTION
+        A trustee that Exchange cannot map to an object is often displayed as a raw
+        Windows SID (e.g. S-1-5-21-1234567890-0987654321-111111111-1234).  These
+        "orphan" entries can be safely removed because the underlying account no
+        longer exists.
+    .PARAMETER Value
+        The trustee string to test.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory)]
+        [string]$Value
+    )
+
+    # Strip DOMAIN\ prefix if present
+    $test = $Value
+    if ($Value -match '^[^\\]+\\(.+)$') {
+        $test = $Matches[1]
+    }
+
+    return $test -match '^S-1-\d+-\d+(-\d+)+$'
+}
+
 function Resolve-Trustee {
     <#
     .SYNOPSIS
         Resolves a trustee identity to a User Principal Name.
     .DESCRIPTION
         Checks the in-memory cache first.  Attempts Get-Recipient, then Get-ADUser.
-        Returns a PSCustomObject with OriginalValue and ResolvedUPN.
+        Returns a PSCustomObject with OriginalValue, ResolvedUPN, and IsOrphanSid.
+        IsOrphanSid is $true when the trustee value is a raw SID that could not be
+        resolved to any known object.
     .PARAMETER Trustee
         The raw trustee string as returned by a permission cmdlet.
     #>
@@ -195,11 +305,13 @@ function Resolve-Trustee {
     $result = [PSCustomObject]@{
         OriginalValue = $Trustee
         ResolvedUPN   = $null
+        IsOrphanSid   = $false
     }
 
     if ($script:TrusteeCache.ContainsKey($Trustee)) {
         $cached = $script:TrusteeCache[$Trustee]
         $result.ResolvedUPN = if ($cached -eq $script:SENTINEL) { $null } else { $cached }
+        $result.IsOrphanSid = ($cached -eq $script:SENTINEL) -and (Test-IsOrphanSid -Value $Trustee)
         return $result
     }
 
@@ -266,8 +378,9 @@ function Resolve-Trustee {
         return $result
     }
 
-    # Unresolved
+    # Unresolved – mark as orphan if value looks like a SID
     $script:TrusteeCache[$Trustee] = $script:SENTINEL
+    $result.IsOrphanSid = Test-IsOrphanSid -Value $Trustee
     return $result
 }
 
@@ -371,10 +484,17 @@ function Remove-FullAccessPermissions {
     <#
     .SYNOPSIS
         Removes Full Access permissions from a mailbox, skipping inherited/deny/SELF entries.
+    .DESCRIPTION
+        Removes entries whose owner is disabled.  When -IncludeOrphan is set, also removes
+        entries whose trustee is an unresolvable SID regardless of owner state.
     .PARAMETER Mailbox
         The mailbox object returned by Get-Mailbox.
     .PARAMETER BaseEntry
         A hashtable of common log fields already populated for this mailbox.
+    .PARAMETER OwnerIsDisabled
+        When $true the function removes permissions because the mailbox owner is disabled.
+    .PARAMETER IncludeOrphan
+        When $true the function also removes orphaned SID trustees.
     #>
     [CmdletBinding(SupportsShouldProcess = $true)]
     param (
@@ -382,8 +502,16 @@ function Remove-FullAccessPermissions {
         [object]$Mailbox,
 
         [Parameter(Mandatory)]
-        [hashtable]$BaseEntry
+        [hashtable]$BaseEntry,
+
+        [Parameter()]
+        [bool]$OwnerIsDisabled = $false,
+
+        [Parameter()]
+        [bool]$IncludeOrphan = $false
     )
+
+    if (-not $OwnerIsDisabled -and -not $IncludeOrphan) { return }
 
     Write-Verbose ("  Processing Full Access for: {0}" -f $Mailbox.PrimarySmtpAddress)
 
@@ -405,11 +533,21 @@ function Remove-FullAccessPermissions {
         $trusteeRaw = $perm.User.ToString()
         $resolved   = Resolve-Trustee -Trustee $trusteeRaw
 
+        $shouldRemove = $OwnerIsDisabled -or ($IncludeOrphan -and $resolved.IsOrphanSid)
+        if (-not $shouldRemove) { continue }
+
+        $reason = if ($resolved.IsOrphanSid -and -not $OwnerIsDisabled) {
+            'Orphaned SID trustee - Full Access cleanup'
+        }
+        else {
+            'Disabled mailbox owner account - Full Access cleanup'
+        }
+
         $entry = $BaseEntry.Clone()
-        $entry['TrusteeOriginal']   = $trusteeRaw
+        $entry['TrusteeOriginal']    = $trusteeRaw
         $entry['TrusteeResolvedUPN'] = if ($resolved.ResolvedUPN) { $resolved.ResolvedUPN } else { '' }
-        $entry['PermissionType']    = 'FullAccess'
-        $entry['Reason']            = 'Disabled mailbox owner account - Full Access cleanup'
+        $entry['PermissionType']     = 'FullAccess'
+        $entry['Reason']             = $reason
 
         $spDescription = "Remove Full Access for '{0}' on mailbox '{1}'" -f `
             $trusteeRaw, $Mailbox.PrimarySmtpAddress
@@ -445,10 +583,17 @@ function Remove-SendAsPermissions {
     <#
     .SYNOPSIS
         Removes Send As permissions from a mailbox using Get-ADPermission.
+    .DESCRIPTION
+        Removes entries whose owner is disabled.  When -IncludeOrphan is set, also removes
+        entries whose trustee is an unresolvable SID regardless of owner state.
     .PARAMETER Mailbox
         The mailbox object returned by Get-Mailbox.
     .PARAMETER BaseEntry
         A hashtable of common log fields already populated for this mailbox.
+    .PARAMETER OwnerIsDisabled
+        When $true the function removes permissions because the mailbox owner is disabled.
+    .PARAMETER IncludeOrphan
+        When $true the function also removes orphaned SID trustees.
     #>
     [CmdletBinding(SupportsShouldProcess = $true)]
     param (
@@ -456,8 +601,16 @@ function Remove-SendAsPermissions {
         [object]$Mailbox,
 
         [Parameter(Mandatory)]
-        [hashtable]$BaseEntry
+        [hashtable]$BaseEntry,
+
+        [Parameter()]
+        [bool]$OwnerIsDisabled = $false,
+
+        [Parameter()]
+        [bool]$IncludeOrphan = $false
     )
+
+    if (-not $OwnerIsDisabled -and -not $IncludeOrphan) { return }
 
     Write-Verbose ("  Processing Send As for: {0}" -f $Mailbox.PrimarySmtpAddress)
 
@@ -479,11 +632,21 @@ function Remove-SendAsPermissions {
         $trusteeRaw = $perm.User.ToString()
         $resolved   = Resolve-Trustee -Trustee $trusteeRaw
 
+        $shouldRemove = $OwnerIsDisabled -or ($IncludeOrphan -and $resolved.IsOrphanSid)
+        if (-not $shouldRemove) { continue }
+
+        $reason = if ($resolved.IsOrphanSid -and -not $OwnerIsDisabled) {
+            'Orphaned SID trustee - Send As cleanup'
+        }
+        else {
+            'Disabled mailbox owner account - Send As cleanup'
+        }
+
         $entry = $BaseEntry.Clone()
         $entry['TrusteeOriginal']    = $trusteeRaw
         $entry['TrusteeResolvedUPN'] = if ($resolved.ResolvedUPN) { $resolved.ResolvedUPN } else { '' }
         $entry['PermissionType']     = 'SendAs'
-        $entry['Reason']             = 'Disabled mailbox owner account - Send As cleanup'
+        $entry['Reason']             = $reason
 
         $spDescription = "Remove Send As for '{0}' on mailbox '{1}'" -f `
             $trusteeRaw, $Mailbox.PrimarySmtpAddress
@@ -519,10 +682,15 @@ function Remove-SendOnBehalfPermissions {
     <#
     .SYNOPSIS
         Clears all Send On Behalf delegates from a mailbox.
+    .DESCRIPTION
+        Send On Behalf entries are stored as Distinguished Names so orphan-SID detection
+        is not applicable here; this function only runs when the mailbox owner is disabled.
     .PARAMETER Mailbox
         The mailbox object returned by Get-Mailbox.
     .PARAMETER BaseEntry
         A hashtable of common log fields already populated for this mailbox.
+    .PARAMETER OwnerIsDisabled
+        When $true the function removes permissions because the mailbox owner is disabled.
     #>
     [CmdletBinding(SupportsShouldProcess = $true)]
     param (
@@ -530,8 +698,13 @@ function Remove-SendOnBehalfPermissions {
         [object]$Mailbox,
 
         [Parameter(Mandatory)]
-        [hashtable]$BaseEntry
+        [hashtable]$BaseEntry,
+
+        [Parameter()]
+        [bool]$OwnerIsDisabled = $false
     )
+
+    if (-not $OwnerIsDisabled) { return }
 
     Write-Verbose ("  Processing Send On Behalf for: {0}" -f $Mailbox.PrimarySmtpAddress)
 
@@ -585,10 +758,17 @@ function Remove-CalendarPermissions {
     <#
     .SYNOPSIS
         Removes non-Default, non-Anonymous calendar permissions from a mailbox.
+    .DESCRIPTION
+        Removes entries whose owner is disabled.  When -IncludeOrphan is set, also removes
+        entries whose trustee is an unresolvable SID regardless of owner state.
     .PARAMETER Mailbox
         The mailbox object returned by Get-Mailbox.
     .PARAMETER BaseEntry
         A hashtable of common log fields already populated for this mailbox.
+    .PARAMETER OwnerIsDisabled
+        When $true the function removes permissions because the mailbox owner is disabled.
+    .PARAMETER IncludeOrphan
+        When $true the function also removes orphaned SID trustees.
     #>
     [CmdletBinding(SupportsShouldProcess = $true)]
     param (
@@ -596,8 +776,16 @@ function Remove-CalendarPermissions {
         [object]$Mailbox,
 
         [Parameter(Mandatory)]
-        [hashtable]$BaseEntry
+        [hashtable]$BaseEntry,
+
+        [Parameter()]
+        [bool]$OwnerIsDisabled = $false,
+
+        [Parameter()]
+        [bool]$IncludeOrphan = $false
     )
+
+    if (-not $OwnerIsDisabled -and -not $IncludeOrphan) { return }
 
     Write-Verbose ("  Processing Calendar permissions for: {0}" -f $Mailbox.PrimarySmtpAddress)
 
@@ -629,11 +817,21 @@ function Remove-CalendarPermissions {
         $trusteeRaw = $perm.User.ToString()
         $resolved   = Resolve-Trustee -Trustee $trusteeRaw
 
+        $shouldRemove = $OwnerIsDisabled -or ($IncludeOrphan -and $resolved.IsOrphanSid)
+        if (-not $shouldRemove) { continue }
+
+        $reason = if ($resolved.IsOrphanSid -and -not $OwnerIsDisabled) {
+            'Orphaned SID trustee - Calendar permission cleanup'
+        }
+        else {
+            'Disabled mailbox owner account - Calendar permission cleanup'
+        }
+
         $entry = $BaseEntry.Clone()
         $entry['TrusteeOriginal']    = $trusteeRaw
         $entry['TrusteeResolvedUPN'] = if ($resolved.ResolvedUPN) { $resolved.ResolvedUPN } else { '' }
         $entry['PermissionType']     = 'CalendarPermission'
-        $entry['Reason']             = 'Disabled mailbox owner account - Calendar permission cleanup'
+        $entry['Reason']             = $reason
 
         $spDescription = "Remove Calendar permission for '{0}' on '{1}'" -f `
             $trusteeRaw, $calPath
@@ -672,9 +870,9 @@ Write-Verbose ("Log file: {0}" -f $LogPath)
 Write-Verbose "Retrieving mailboxes..."
 
 try {
-    $allMailboxes = Get-Mailbox -ResultSize $ResultSize `
-                                -RecipientTypeDetails UserMailbox `
-                                -ErrorAction Stop
+    $allMailboxes = @(Get-Mailbox -ResultSize $ResultSize `
+                                  -RecipientTypeDetails UserMailbox `
+                                  -ErrorAction Stop)
 }
 catch {
     throw ("Failed to retrieve mailboxes: {0}" -f $_.Exception.Message)
@@ -694,31 +892,38 @@ foreach ($mbx in $allMailboxes) {
     Write-Verbose ("[{0}/{1}] Checking: {2}" -f $current, $total, $mbx.PrimarySmtpAddress)
 
     # --- Determine if the mailbox owner AD account is disabled ---
-    $ownerSam = $mbx.SamAccountName
+    $ownerSam      = $mbx.SamAccountName
+    $ownerDisabled = $false
+    $adUser        = $null
+
     if ([string]::IsNullOrWhiteSpace($ownerSam)) {
-        Write-Verbose ("  No SamAccountName found; skipping.")
-        continue
+        Write-Verbose ("  No SamAccountName found.")
+    }
+    else {
+        $adUser = Get-MailboxOwnerADUser -SamAccountName $ownerSam
+        if (-not $adUser) {
+            Write-Verbose ("  Could not retrieve AD account for '{0}'." -f $ownerSam)
+        }
+        elseif ($adUser.Enabled -eq $false) {
+            $ownerDisabled = $true
+            Write-Verbose ("  Account '{0}' is DISABLED." -f $ownerSam)
+        }
+        else {
+            Write-Verbose ("  Account '{0}' is enabled." -f $ownerSam)
+        }
     }
 
-    $adUser = Get-MailboxOwnerADUser -SamAccountName $ownerSam
-    if (-not $adUser) {
-        Write-Verbose ("  Could not retrieve AD account for '{0}'; skipping." -f $ownerSam)
+    # Skip entirely when neither condition warrants processing
+    if (-not $ownerDisabled -and -not $Orphan) {
         continue
     }
-
-    if ($adUser.Enabled -ne $false) {
-        Write-Verbose ("  Account '{0}' is enabled; skipping." -f $ownerSam)
-        continue
-    }
-
-    Write-Verbose ("  Account '{0}' is DISABLED. Processing permissions." -f $ownerSam)
 
     # Build the base log entry shared by all permission removals for this mailbox
     $baseEntry = @{
         MailboxDisplayName         = $mbx.DisplayName
         MailboxPrimarySmtpAddress  = $mbx.PrimarySmtpAddress.ToString()
-        MailboxOwnerSamAccountName = $ownerSam
-        MailboxOwnerUPN            = $adUser.UserPrincipalName
+        MailboxOwnerSamAccountName = if ($ownerSam) { $ownerSam } else { '' }
+        MailboxOwnerUPN            = if ($adUser -and $adUser.UserPrincipalName) { $adUser.UserPrincipalName } else { '' }
         MailboxRecipientType       = $mbx.RecipientTypeDetails.ToString()
         TrusteeOriginal            = ''
         TrusteeResolvedUPN         = ''
@@ -729,37 +934,48 @@ foreach ($mbx in $allMailboxes) {
         ErrorMessage               = ''
     }
 
-    # Process all four permission types
-    try {
-        Remove-FullAccessPermissions -Mailbox $mbx -BaseEntry $baseEntry
-    }
-    catch {
-        Write-Warning ("Unexpected error in Remove-FullAccessPermissions for '{0}': {1}" -f `
-            $mbx.PrimarySmtpAddress, $_.Exception.Message)
-    }
-
-    try {
-        Remove-SendAsPermissions -Mailbox $mbx -BaseEntry $baseEntry
-    }
-    catch {
-        Write-Warning ("Unexpected error in Remove-SendAsPermissions for '{0}': {1}" -f `
-            $mbx.PrimarySmtpAddress, $_.Exception.Message)
+    if ($FullAccess) {
+        try {
+            Remove-FullAccessPermissions -Mailbox $mbx -BaseEntry $baseEntry `
+                -OwnerIsDisabled $ownerDisabled -IncludeOrphan ([bool]$Orphan)
+        }
+        catch {
+            Write-Warning ("Unexpected error in Remove-FullAccessPermissions for '{0}': {1}" -f `
+                $mbx.PrimarySmtpAddress, $_.Exception.Message)
+        }
     }
 
-    try {
-        Remove-SendOnBehalfPermissions -Mailbox $mbx -BaseEntry $baseEntry
-    }
-    catch {
-        Write-Warning ("Unexpected error in Remove-SendOnBehalfPermissions for '{0}': {1}" -f `
-            $mbx.PrimarySmtpAddress, $_.Exception.Message)
+    if ($SendAs) {
+        try {
+            Remove-SendAsPermissions -Mailbox $mbx -BaseEntry $baseEntry `
+                -OwnerIsDisabled $ownerDisabled -IncludeOrphan ([bool]$Orphan)
+        }
+        catch {
+            Write-Warning ("Unexpected error in Remove-SendAsPermissions for '{0}': {1}" -f `
+                $mbx.PrimarySmtpAddress, $_.Exception.Message)
+        }
     }
 
-    try {
-        Remove-CalendarPermissions -Mailbox $mbx -BaseEntry $baseEntry
+    if ($SendOnBehalfOf) {
+        try {
+            Remove-SendOnBehalfPermissions -Mailbox $mbx -BaseEntry $baseEntry `
+                -OwnerIsDisabled $ownerDisabled
+        }
+        catch {
+            Write-Warning ("Unexpected error in Remove-SendOnBehalfPermissions for '{0}': {1}" -f `
+                $mbx.PrimarySmtpAddress, $_.Exception.Message)
+        }
     }
-    catch {
-        Write-Warning ("Unexpected error in Remove-CalendarPermissions for '{0}': {1}" -f `
-            $mbx.PrimarySmtpAddress, $_.Exception.Message)
+
+    if ($Calendar) {
+        try {
+            Remove-CalendarPermissions -Mailbox $mbx -BaseEntry $baseEntry `
+                -OwnerIsDisabled $ownerDisabled -IncludeOrphan ([bool]$Orphan)
+        }
+        catch {
+            Write-Warning ("Unexpected error in Remove-CalendarPermissions for '{0}': {1}" -f `
+                $mbx.PrimarySmtpAddress, $_.Exception.Message)
+        }
     }
 }
 

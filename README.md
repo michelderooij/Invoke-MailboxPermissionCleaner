@@ -47,9 +47,27 @@ All removal attempts are written to a CSV log file.
 |---|---|---|
 | `-LogPath` | `MailboxPermissionCleaner_<timestamp>.csv` in CWD | Path to the CSV log file |
 | `-ResultSize` | `Unlimited` | Maximum mailboxes returned by `Get-Mailbox` |
+| `-FullAccess` | (see note) | Process Full Access permissions |
+| `-SendAs` | (see note) | Process Send As permissions |
+| `-SendOnBehalfOf` | (see note) | Process Send On Behalf Of permissions |
+| `-Calendar` | (see note) | Process Calendar folder permissions |
+| `-Orphan` | `$false` | Also remove unresolvable SID trustees from all mailboxes |
 | `-WhatIf` | — | Simulates all removals; no changes made |
 | `-Confirm` | — | Prompts before each removal |
 | `-Verbose` | — | Writes detailed progress to the console |
+
+> **Note on permission-type switches:** When none of `-FullAccess`, `-SendAs`, `-SendOnBehalfOf`, or `-Calendar` are specified, all four are processed (backward-compatible default).
+
+### -Orphan behaviour
+
+When `-Orphan` is specified, the script also inspects *every* mailbox (regardless of owner account state) for permission entries whose trustee value is an unresolvable Windows SID (e.g. `S-1-5-21-1234567890-...`). Such entries indicate the original account has been deleted from Active Directory. They are removed automatically and logged with `Reason = "Orphaned SID trustee - <type> cleanup"`.
+
+The `-FullAccess`, `-SendAs`, and `-Calendar` switches still control which permission types are examined for orphans. `-SendOnBehalfOf` is excluded from orphan handling because those entries are stored as Distinguished Names, not SIDs.
+
+```powershell
+# Remove only orphaned Full Access and Calendar SID entries (no owner-disabled check)
+.\Invoke-MailboxPermissionCleaner.ps1 -Orphan -FullAccess -Calendar -WhatIf
+```
 
 ---
 
