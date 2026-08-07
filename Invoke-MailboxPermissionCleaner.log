@@ -1,0 +1,5 @@
+﻿"Timestamp","MailboxDisplayName","MailboxPrimarySmtpAddress","MailboxOwnerSamAccountName","MailboxOwnerUPN","MailboxRecipientType","TrusteeOriginal","TrusteeResolvedUPN","PermissionType","RemovedAction","Reason","Success","ErrorMessage"
+"2026-08-07 18:10:33","Jaap Jansen","Jaap@contoso.com","jaap","jaap@contoso.com","UserMailbox","AD\testuser","CN=testuser,OU=NL,DC=ad,DC=contoso,DC=com","FullAccess","Removed","Disabled trustee - Full Access cleanup","True",""
+"2026-08-07 18:10:37","Jaap Jansen","Jaap@contoso.com","jaap","jaap@contoso.com","UserMailbox","AD\testuser","CN=testuser,OU=NL,DC=ad,DC=contoso,DC=com","SendAs","Removed","Disabled trustee - Send As cleanup","True",""
+"2026-08-07 18:10:37","Jaap Jansen","Jaap@contoso.com","jaap","jaap@contoso.com","UserMailbox","ad.contoso.com/NL/testuser","CN=testuser,OU=NL,DC=ad,DC=contoso,DC=com","SendOnBehalf","Removed","Disabled trustee - Send On Behalf cleanup","True",""
+"2026-08-07 18:10:39","Jaap Jansen","Jaap@contoso.com","jaap","jaap@contoso.com","UserMailbox","testuser","CN=testuser,OU=NL,DC=ad,DC=contoso,DC=com","CalendarPermission","Removed","Disabled trustee - Calendar permission cleanup","True",""
