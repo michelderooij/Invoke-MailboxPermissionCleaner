@@ -12,7 +12,7 @@
     ENTIRE RISK OF THE USE OR THE RESULTS FROM THE USE OF THIS CODE REMAINS
     WITH THE USER.
 
-    Version 1.6.1, August 11, 2026
+    Version 1.6.4, August 11, 2026
 
     .DESCRIPTION
     Invoke-MailboxPermissionCleaner enumerates all UserMailbox recipients and supports
@@ -33,6 +33,10 @@
     For each mailbox whose owner Active Directory account is disabled, it removes the
     permission types selected by the -FullAccess, -SendAs, -SendOnBehalfOf, and
     -Calendar switches.
+
+    Use -IgnoreDisabledOwner to disable owner-disabled-triggered removals. When this
+    switch is set, owner-disabled state is ignored and removals are only triggered by
+    disabled trustees and (on-premises only) orphaned SID trustees.
 
     Orphan mode (-Orphan switch)
     ----------------------------
@@ -101,6 +105,11 @@
 
     In Exchange Online mode, this switch is ignored after writing a notice.
 
+.PARAMETER IgnoreDisabledOwner
+    Ignores mailbox owner disabled state when deciding whether to remove permissions.
+    When specified, owner-disabled-triggered removals are skipped. Disabled-trustee and
+    orphan (on-premises only) logic still applies.
+
 .PARAMETER WhatIf
     Simulates all removal operations without making changes. Findings are written to
     the pipeline and also logged to the CSV log file so the WhatIf run is auditable.
@@ -137,7 +146,13 @@
     .\Invoke-MailboxPermissionCleaner.ps1 -WhatIf | Out-GridView
 
     Scans all mailboxes and displays every finding in a grid view without making
-    any changes or writing a log file.
+    any changes; findings are also written to the CSV log file.
+
+.EXAMPLE
+    .\Invoke-MailboxPermissionCleaner.ps1 -IgnoreDisabledOwner -SendAs -FullAccess
+
+    Ignores owner-disabled-triggered removals and only removes Send As / Full Access
+    entries when trustees are disabled (and orphans when -Orphan is specified on-prem).
 
 .EXAMPLE
     .\Invoke-MailboxPermissionCleaner.ps1 -WhatIf -Orphan -FullAccess | Export-Csv -Path C:\Reports\findings.csv -NoTypeInformation
@@ -147,7 +162,7 @@
 
 .NOTES
     Author  : Invoke-MailboxPermissionCleaner
-    Version : 1.6.1
+    Version : 1.6.4
     Requires: Exchange Management Shell or Exchange Online PowerShell, PowerShell 5.1+
 
     Caching Architecture
@@ -231,7 +246,10 @@ param (
     [switch]$Calendar,
 
     [Parameter()]
-    [switch]$Orphan
+    [switch]$Orphan,
+
+    [Parameter()]
+    [switch]$IgnoreDisabledOwner
 )
 
 Set-StrictMode -Version Latest
@@ -250,6 +268,7 @@ if (-not $anyTypeSwitch) {
 #region --- Cache initialisation ---------------------------------------------------
 
 $script:TrusteeCache = @{}   # raw trustee string  -> UPN string | $null
+$script:TrusteeTypeCache = @{}   # raw trustee string  -> recipient type details | $null
 $script:RecipientCache = @{}   # identity string     -> recipient object | $null
 $script:ADUserCache = @{}   # identity string     -> ADUser object    | $null
 $script:CalendarCache = @{}   # mailbox identity    -> calendar folder path string
@@ -385,7 +404,8 @@ function Write-LogEntry {
         MailboxOwnerUPN            = $Entry['MailboxOwnerUPN']
         MailboxRecipientType       = $Entry['MailboxRecipientType']
         TrusteeOriginal            = $Entry['TrusteeOriginal']
-        TrusteeResolvedUPN         = $Entry['TrusteeResolvedUPN']
+        TrusteeResolvedIdentity    = $Entry['TrusteeResolvedIdentity']
+        TrusteeRecipientTypeDetails = $Entry['TrusteeRecipientTypeDetails']
         PermissionType             = $Entry['PermissionType']
         RemovedAction              = $Entry['RemovedAction']
         Reason                     = $Entry['Reason']
@@ -470,12 +490,15 @@ function Resolve-Trustee {
     $result = [PSCustomObject]@{
         OriginalValue = $Trustee
         ResolvedUPN   = $null
+        TrusteeRecipientTypeDetails = $null
         IsOrphanSid   = $false
     }
 
     if ($script:TrusteeCache.ContainsKey($Trustee)) {
         $cached = $script:TrusteeCache[$Trustee]
+        $cachedType = if ($script:TrusteeTypeCache.ContainsKey($Trustee)) { $script:TrusteeTypeCache[$Trustee] } else { $null }
         $result.ResolvedUPN = if ($cached -eq $script:SENTINEL) { $null } else { $cached }
+        $result.TrusteeRecipientTypeDetails = if ($cachedType -eq $script:SENTINEL) { $null } else { $cachedType }
         $result.IsOrphanSid = ($cached -eq $script:SENTINEL) -and (Test-IsOrphanSid -Value $Trustee)
         Write-Debug ("      [Resolve-Trustee] Cache hit for '{0}': ResolvedUPN={1}, IsOrphanSid={2}" -f $Trustee, $(if ($result.ResolvedUPN) { $result.ResolvedUPN } else { 'NULL' }), $result.IsOrphanSid)
         return $result
@@ -504,8 +527,11 @@ function Resolve-Trustee {
     # where two Get-Recipient calls return visually identical but subtly different DN objects).
     if ($identity -ne $Trustee -and $script:TrusteeCache.ContainsKey($identity)) {
         $cached = $script:TrusteeCache[$identity]
+        $cachedType = if ($script:TrusteeTypeCache.ContainsKey($identity)) { $script:TrusteeTypeCache[$identity] } else { $null }
         $script:TrusteeCache[$Trustee] = $cached  # also store under original key
+        $script:TrusteeTypeCache[$Trustee] = $cachedType
         $result.ResolvedUPN = if ($cached -eq $script:SENTINEL) { $null } else { $cached }
+        $result.TrusteeRecipientTypeDetails = if ($cachedType -eq $script:SENTINEL) { $null } else { $cachedType }
         $result.IsOrphanSid = ($cached -eq $script:SENTINEL) -and (Test-IsOrphanSid -Value $Trustee)
         Write-Debug ("      [Resolve-Trustee] Cache hit (via normalized '{0}') for '{1}': ResolvedUPN={2}" -f $identity, $Trustee, $(if ($result.ResolvedUPN) { $result.ResolvedUPN } else { 'NULL' }))
         return $result
@@ -555,13 +581,17 @@ function Resolve-Trustee {
         }
 
         if ($resolvedUpn) {
+            $recipientTypeDetails = if ($recipient.RecipientTypeDetails) { $recipient.RecipientTypeDetails.ToString() } else { $null }
             # Store under both original and normalized keys so future lookups for the same user
             # (regardless of input format) reuse the exact same DN string
             $script:TrusteeCache[$Trustee] = $resolvedUpn
+            $script:TrusteeTypeCache[$Trustee] = if ($recipientTypeDetails) { $recipientTypeDetails } else { $script:SENTINEL }
             if ($identity -ne $Trustee) {
                 $script:TrusteeCache[$identity] = $resolvedUpn
+                $script:TrusteeTypeCache[$identity] = if ($recipientTypeDetails) { $recipientTypeDetails } else { $script:SENTINEL }
             }
             $result.ResolvedUPN = $resolvedUpn
+            $result.TrusteeRecipientTypeDetails = $recipientTypeDetails
             Write-Verbose ("      [Resolve-Trustee] Resolved via Get-Recipient: {0}" -f $resolvedUpn)
             return $result
         }
@@ -570,8 +600,10 @@ function Resolve-Trustee {
     if ($script:ExchangeEnvironment -ne 'OnPrem') {
         Write-Debug ("      [Resolve-Trustee] EXO mode and recipient lookup failed for '{0}' - caching SENTINEL" -f $Trustee)
         $script:TrusteeCache[$Trustee] = $script:SENTINEL
+        $script:TrusteeTypeCache[$Trustee] = $script:SENTINEL
         if ($identity -ne $Trustee) {
             $script:TrusteeCache[$identity] = $script:SENTINEL
+            $script:TrusteeTypeCache[$identity] = $script:SENTINEL
         }
         $result.IsOrphanSid = Test-IsOrphanSid -Value $Trustee
         return $result
@@ -604,8 +636,10 @@ function Resolve-Trustee {
     if ($adUser -and $adUser.UserPrincipalName) {
         $upn = $adUser.UserPrincipalName
         $script:TrusteeCache[$Trustee] = $upn
+        $script:TrusteeTypeCache[$Trustee] = $script:SENTINEL
         if ($identity -ne $Trustee) {
             $script:TrusteeCache[$identity] = $upn
+            $script:TrusteeTypeCache[$identity] = $script:SENTINEL
         }
         $result.ResolvedUPN = $upn
         Write-Verbose ("      [Resolve-Trustee] Resolved via Get-ADUser: {0}" -f $upn)
@@ -615,8 +649,10 @@ function Resolve-Trustee {
     # Unresolved – mark as orphan if value looks like a SID
     Write-Debug ("      [Resolve-Trustee] Failed to resolve '{0}' - caching SENTINEL" -f $Trustee)
     $script:TrusteeCache[$Trustee] = $script:SENTINEL
+    $script:TrusteeTypeCache[$Trustee] = $script:SENTINEL
     if ($identity -ne $Trustee) {
         $script:TrusteeCache[$identity] = $script:SENTINEL
+        $script:TrusteeTypeCache[$identity] = $script:SENTINEL
     }
     $result.IsOrphanSid = Test-IsOrphanSid -Value $Trustee
     return $result
@@ -880,7 +916,8 @@ function Remove-FullAccessPermissions {
 
         $entry = $BaseEntry.Clone()
         $entry['TrusteeOriginal'] = $trusteeRaw
-        $entry['TrusteeResolvedUPN'] = if ($resolved.ResolvedUPN) { $resolved.ResolvedUPN } else { '' }
+        $entry['TrusteeResolvedIdentity'] = if ($resolved.ResolvedUPN) { $resolved.ResolvedUPN } else { '' }
+        $entry['TrusteeRecipientTypeDetails'] = if ($resolved.TrusteeRecipientTypeDetails) { $resolved.TrusteeRecipientTypeDetails } else { '' }
         $entry['PermissionType'] = 'FullAccess'
         $entry['Reason'] = $reason
 
@@ -1015,7 +1052,8 @@ function Remove-SendAsPermissions {
 
         $entry = $BaseEntry.Clone()
         $entry['TrusteeOriginal'] = $trusteeRaw
-        $entry['TrusteeResolvedUPN'] = if ($resolved.ResolvedUPN) { $resolved.ResolvedUPN } else { '' }
+        $entry['TrusteeResolvedIdentity'] = if ($resolved.ResolvedUPN) { $resolved.ResolvedUPN } else { '' }
+        $entry['TrusteeRecipientTypeDetails'] = if ($resolved.TrusteeRecipientTypeDetails) { $resolved.TrusteeRecipientTypeDetails } else { '' }
         $entry['PermissionType'] = 'SendAs'
         $entry['Reason'] = $reason
 
@@ -1131,7 +1169,8 @@ function Remove-SendOnBehalfPermissions {
 
         $entry = $BaseEntry.Clone()
         $entry['TrusteeOriginal'] = $trusteeRaw
-        $entry['TrusteeResolvedUPN'] = if ($resolved.ResolvedUPN) { $resolved.ResolvedUPN } else { '' }
+        $entry['TrusteeResolvedIdentity'] = if ($resolved.ResolvedUPN) { $resolved.ResolvedUPN } else { '' }
+        $entry['TrusteeRecipientTypeDetails'] = if ($resolved.TrusteeRecipientTypeDetails) { $resolved.TrusteeRecipientTypeDetails } else { '' }
         $entry['PermissionType'] = 'SendOnBehalf'
         $entry['Reason'] = $reason
 
@@ -1260,7 +1299,8 @@ function Remove-CalendarPermissions {
 
         $entry = $BaseEntry.Clone()
         $entry['TrusteeOriginal'] = $trusteeRaw
-        $entry['TrusteeResolvedUPN'] = if ($resolved.ResolvedUPN) { $resolved.ResolvedUPN } else { '' }
+        $entry['TrusteeResolvedIdentity'] = if ($resolved.ResolvedUPN) { $resolved.ResolvedUPN } else { '' }
+        $entry['TrusteeRecipientTypeDetails'] = if ($resolved.TrusteeRecipientTypeDetails) { $resolved.TrusteeRecipientTypeDetails } else { '' }
         $entry['PermissionType'] = 'CalendarPermission'
         $entry['Reason'] = $reason
 
@@ -1365,7 +1405,10 @@ try {
         $ownerDisabled = $false
         $adUser = $null
 
-        if ($script:ExchangeEnvironment -eq 'OnPrem') {
+        if ($IgnoreDisabledOwner) {
+            Write-Verbose '  Owner-disabled checks are disabled by -IgnoreDisabledOwner.'
+        }
+        elseif ($script:ExchangeEnvironment -eq 'OnPrem') {
             if ([string]::IsNullOrWhiteSpace($ownerSam)) {
                 Write-Verbose ("  No SamAccountName found.")
             }
@@ -1417,7 +1460,8 @@ try {
             MailboxOwnerUPN            = if ($adUser -and $adUser.UserPrincipalName) { $adUser.UserPrincipalName } else { '' }
             MailboxRecipientType       = $mbx.RecipientTypeDetails.ToString()
             TrusteeOriginal            = ''
-            TrusteeResolvedUPN         = ''
+            TrusteeResolvedIdentity    = ''
+            TrusteeRecipientTypeDetails = ''
             PermissionType             = ''
             RemovedAction              = ''
             Reason                     = 'Disabled mailbox owner account'

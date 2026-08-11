@@ -7,6 +7,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.6.4] - 2026-08-11
+
+### Added
+
+- Added `-IgnoreDisabledOwner` switch to ignore mailbox owner disabled-state as a removal trigger.
+- Added `TrusteeRecipientTypeDetails` column to output/log rows when trustee recipient type can be resolved.
+
+### Changed
+
+- Renamed output/log column `TrusteeResolvedUPN` to `TrusteeResolvedIdentity` to reflect that resolved values can be DistinguishedName, SMTP, or UPN.
+
 ## [1.6.3] - 2026-08-11
 
 ### Changed

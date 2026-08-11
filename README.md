@@ -57,6 +57,9 @@ Run from either an Exchange Management Shell session (on-premises) or a connecte
 # Remove orphaned SID entries from all mailboxes (Full Access and Calendar only)
 .\Invoke-MailboxPermissionCleaner.ps1 -Orphan -FullAccess -Calendar
 
+# Ignore owner-disabled-triggered removals; process trustee-driven conditions only
+.\Invoke-MailboxPermissionCleaner.ps1 -IgnoreDisabledOwner -FullAccess -SendAs
+
 # Report orphaned Full Access entries across all mailboxes, export to CSV
 .\Invoke-MailboxPermissionCleaner.ps1 -WhatIf -Orphan -FullAccess |
     Export-Csv -Path C:\Reports\orphans.csv -NoTypeInformation
@@ -75,6 +78,7 @@ Run from either an Exchange Management Shell session (on-premises) or a connecte
 | `-SendOnBehalfOf` | `Switch` | *(see note)* | Process Send On Behalf Of (`GrantSendOnBehalfTo`) entries. |
 | `-Calendar` | `Switch` | *(see note)* | Process Calendar folder (`MailboxFolderPermission`) entries. |
 | `-Orphan` | `Switch` | `$false` | On-premises only. Removes unresolvable SID trustees from **all** mailboxes, regardless of owner state. In Exchange Online, this switch is ignored with a notice. |
+| `-IgnoreDisabledOwner` | `Switch` | `$false` | Ignores disabled mailbox owner state as a removal trigger. Trustee-disabled and orphan (on-premises) logic still applies. |
 | `-WhatIf` | `Switch` | — | Simulate all removals. Findings are written to the pipeline and also written to the CSV log file; output can be piped to `Out-GridView`, `Export-Csv`, etc. |
 | `-Confirm` | `Switch` | — | Prompt before each removal operation. |
 | `-Verbose` | `Switch` | — | Write detailed progress information to the console. |
@@ -148,7 +152,8 @@ If `Get-ADForest` cannot be reached, a warning is written and the script continu
 | `MailboxOwnerUPN` | UPN of the mailbox owner |
 | `MailboxRecipientType` | Recipient type details (e.g. `UserMailbox`) |
 | `TrusteeOriginal` | Raw trustee string as returned by the permission cmdlet |
-| `TrusteeResolvedUPN` | Resolved UPN of the trustee (empty if unresolvable) |
+| `TrusteeResolvedIdentity` | Resolved trustee identity (for example DistinguishedName, SMTP address, or UPN; empty if unresolvable) |
+| `TrusteeRecipientTypeDetails` | Trustee recipient type details when resolvable via Exchange recipient lookup (empty if unavailable) |
 | `PermissionType` | `FullAccess` \| `SendAs` \| `SendOnBehalf` \| `CalendarPermission` |
 | `RemovedAction` | `Removed` \| `Failed` \| `WhatIf` |
 | `Reason` | Human-readable reason for removal |
