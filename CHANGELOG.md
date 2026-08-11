@@ -7,6 +7,48 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.6.3] - 2026-08-11
+
+### Changed
+
+- `-WhatIf` runs now write findings to both the pipeline and the CSV log file (`-LogPath`) for auditability.
+
+## [1.6.2] - 2026-08-11
+
+### Changed
+
+- Implemented batched CSV logging writes to reduce per-entry I/O overhead.
+- Switched mailbox processing to streaming enumeration instead of preloading all mailboxes in memory.
+- Hardened EXO disabled-state checks with explicit warnings when disabled state cannot be determined.
+- Corrected AD trustee lookup filter construction for SamAccountName resolution.
+
+## [1.6.1] - 2026-08-11
+
+### Changed
+
+- Removed user-facing `-Environment` parameter.
+- Environment selection is now always automatic at startup (on-premises vs Exchange Online).
+
+## [1.6.0] - 2026-08-11
+
+### Added
+
+- **Unified environment support** in one script via new `-Environment` parameter with values `Auto`, `OnPrem`, and `ExchangeOnline`.
+- **Automatic environment detection** at startup, with validation of required cmdlets for the resolved mode.
+- **Exchange Online Send As routing** using `Get-RecipientPermission` and `Remove-RecipientPermission`.
+
+### Changed
+
+- Removed hard `#Requires -Modules ActiveDirectory` dependency so Exchange Online mode can run without the AD module.
+- `-Orphan` is now **on-premises only**; in Exchange Online mode the script writes a notice and continues with orphan handling disabled.
+- Owner/trustee disabled-account checks are now environment-aware:
+  - On-premises: `Get-ADUser`
+  - Exchange Online: `Get-User` (without Graph dependency)
+
+### Documentation
+
+- Updated script help and README to describe unified on-premises/Exchange Online behavior, Send As cmdlet routing, and the on-premises-only orphan limitation.
+
 ## [1.5.1] - 2026-08-07
 
 ### Added

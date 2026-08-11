@@ -1,19 +1,22 @@
 # Invoke-MailboxPermissionCleaner
 
-Removes mailbox-related permissions from Exchange on-premises `UserMailbox` recipients whose Active Directory owner account is **disabled**, and optionally removes orphaned (SID-only) permissions from all mailboxes.
+Removes mailbox-related permissions from Exchange `UserMailbox` recipients whose owner account is **disabled**, and optionally removes orphaned (SID-only) permissions from all mailboxes in Exchange on-premises mode.
 
 ## Overview
 
-`Invoke-MailboxPermissionCleaner.ps1` is a production-ready PowerShell 5.1+ script designed to run from an **Exchange Management Shell (EMS)** session. It discovers all `UserMailbox` recipients, checks whether the owning AD account is disabled, and – for each disabled owner – removes the selected permission types. Use `-WhatIf` to preview findings on screen without making changes or writing a log file.
+`Invoke-MailboxPermissionCleaner.ps1` is a production-ready PowerShell 5.1+ script that supports both **Exchange on-premises** and **Exchange Online** in one unified script. It discovers all `UserMailbox` recipients, checks whether the owner account is disabled, and removes selected permission types. Use `-WhatIf` to preview findings on screen without making changes.
+
+At startup, the script auto-detects whether it runs in Exchange on-premises or Exchange Online.
 
 | Permission type | Cmdlets used |
 |---|---|
 | Full Access | `Get-MailboxPermission` / `Remove-MailboxPermission` |
-| Send As | `Get-ADPermission` / `Remove-ADPermission` |
+| Send As (On-premises) | `Get-ADPermission` / `Remove-ADPermission` |
+| Send As (Exchange Online) | `Get-RecipientPermission` / `Remove-RecipientPermission` |
 | Send On Behalf | `Set-Mailbox -GrantSendOnBehalfTo @{ Remove = … }` |
 | Calendar folder | `Get-MailboxFolderPermission` / `Remove-MailboxFolderPermission` |
 
-All removal attempts are written to a timestamped CSV log file (unless `-WhatIf` is used).
+All removal attempts are written to a timestamped CSV log file, including `-WhatIf` runs.
 
 ---
 
@@ -22,18 +25,18 @@ All removal attempts are written to a timestamped CSV log file (unless `-WhatIf`
 | Requirement | Details |
 |---|---|
 | PowerShell | 5.1 or later |
-| Exchange Management Shell | Exchange Server 2013, 2016, or 2019 |
-| ActiveDirectory module | `RSAT-AD-PowerShell` feature or equivalent |
+| Exchange Management Shell / Exchange Online | Exchange Server 2013, 2016, 2019, or Exchange Online PowerShell session |
+| ActiveDirectory module | Required in on-premises mode only (`RSAT-AD-PowerShell` feature or equivalent) |
 | Exchange permissions | Organization Management or equivalent (read + remove mailbox permissions) |
 
-The script must be run **from within an Exchange Management Shell session** (or a remote PowerShell session with Exchange cmdlets imported). Standard Windows PowerShell with only the ActiveDirectory module is not sufficient.
+Run from either an Exchange Management Shell session (on-premises) or a connected Exchange Online PowerShell session (cloud).
 
 ---
 
 ## Usage
 
 ```powershell
-# Dry run with -WhatIf – simulate removals and emit findings to the pipeline without writing a log file
+# Dry run with -WhatIf – simulate removals and emit findings to the pipeline while also writing to the CSV log
 .\Invoke-MailboxPermissionCleaner.ps1 -WhatIf
 
 # Dry run piped to grid view – interactively review all findings
@@ -65,14 +68,14 @@ The script must be run **from within an Exchange Management Shell session** (or 
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `-LogPath` | `String` | `MailboxPermissionCleaner_<yyyyMMdd_HHmmss>.csv` in CWD | Full path to the CSV log file. Appends if the file already exists. Ignored when `-WhatIf` is used. |
+| `-LogPath` | `String` | `Invoke-MailboxPermissionCleaner-<yyyyMMdd_HHmmss>.csv` in CWD | Full path to the CSV log file. Appends if the file already exists. |
 | `-ResultSize` | `String` | `Unlimited` | Maximum number of mailboxes returned by `Get-Mailbox`. |
 | `-FullAccess` | `Switch` | *(see note)* | Process Full Access (`MailboxPermission`) entries. |
 | `-SendAs` | `Switch` | *(see note)* | Process Send As (`ADPermission`) entries. |
 | `-SendOnBehalfOf` | `Switch` | *(see note)* | Process Send On Behalf Of (`GrantSendOnBehalfTo`) entries. |
 | `-Calendar` | `Switch` | *(see note)* | Process Calendar folder (`MailboxFolderPermission`) entries. |
-| `-Orphan` | `Switch` | `$false` | Also remove unresolvable SID trustees from **all** mailboxes, regardless of owner state. |
-| `-WhatIf` | `Switch` | — | Simulate all removals. Findings are written to the pipeline instead of the log file, and can be piped to `Out-GridView`, `Export-Csv`, etc. |
+| `-Orphan` | `Switch` | `$false` | On-premises only. Removes unresolvable SID trustees from **all** mailboxes, regardless of owner state. In Exchange Online, this switch is ignored with a notice. |
+| `-WhatIf` | `Switch` | — | Simulate all removals. Findings are written to the pipeline and also written to the CSV log file; output can be piped to `Out-GridView`, `Export-Csv`, etc. |
 | `-Confirm` | `Switch` | — | Prompt before each removal operation. |
 | `-Verbose` | `Switch` | — | Write detailed progress information to the console. |
 
@@ -102,7 +105,9 @@ The rationale is that disabled accounts pose a security and compliance risk and 
 
 ### -Orphan mode
 
-When `-Orphan` is specified, the script additionally scans **every** mailbox (regardless of owner state) for trustees that resolve to a raw Windows SID (e.g. `S-1-5-21-1234567890-...`). These orphaned entries indicate the original account has been permanently deleted from Active Directory. They are removed and logged with `Reason = "Orphaned SID trustee - <type> cleanup"`.
+When `-Orphan` is specified in **on-premises mode**, the script additionally scans **every** mailbox (regardless of owner state) for trustees that resolve to a raw Windows SID (e.g. `S-1-5-21-1234567890-...`). These orphaned entries indicate the original account has been permanently deleted from Active Directory. They are removed and logged with `Reason = "Orphaned SID trustee - <type> cleanup"`.
+
+In **Exchange Online mode**, orphan SID detection is not supported. The script writes a notice and continues with orphan handling disabled.
 
 The `-FullAccess`, `-SendAs`, and `-Calendar` switches control which permission types are inspected for orphans. `-SendOnBehalfOf` is excluded because those entries are stored as Distinguished Names, not SIDs.
 
@@ -116,7 +121,7 @@ The `-FullAccess`, `-SendAs`, and `-Calendar` switches control which permission 
 When `-WhatIf` is specified:
 
 - **No Exchange or AD changes are made** — all removal cmdlets are skipped.
-- **No CSV log file is written** — the `-LogPath` parameter is ignored.
+- **CSV log file is still written** — findings are appended to the `-LogPath` CSV for auditability.
 - **Findings are written to the pipeline** as `PSCustomObject` instances with the same columns as the CSV log. These can be piped to `Out-GridView`, `Export-Csv`, `Format-Table`, etc.
 - `RemovedAction` is set to `WhatIf` for every finding.
 
@@ -124,7 +129,7 @@ When `-WhatIf` is specified:
 
 ### Multi-Forest / Linked Mailbox Support
 
-In environments where mailboxes live in a dedicated Exchange resource forest and owner accounts live in a separate accounts forest, Exchange cmdlets may only see the local forest by default. At startup the script calls `Get-ADForest` and automatically enables `Set-ADServerSettings -ViewEntireForest $true` when the forest contains more than one domain. No switch or manual configuration is required.
+In on-premises environments where mailboxes live in a dedicated Exchange resource forest and owner accounts live in a separate accounts forest, Exchange cmdlets may only see the local forest by default. At startup the script calls `Get-ADForest` and automatically enables `Set-ADServerSettings -ViewEntireForest $true` when the forest contains more than one domain. No switch or manual configuration is required.
 
 If `Get-ADForest` cannot be reached, a warning is written and the script continues — ViewEntireForest will remain at its current session value.
 

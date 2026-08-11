@@ -1,9 +1,9 @@
 <#
     .SYNOPSIS
     Invoke-MailboxPermissionCleaner
-    Removes mailbox-related permissions from Exchange mailboxes whose Active Directory
-    owner account is disabled, and optionally removes orphaned (SID-only) permissions
-    from all mailboxes.
+    Removes mailbox-related permissions from Exchange mailboxes whose owner account is
+    disabled, and optionally removes orphaned (SID-only) permissions from all mailboxes
+    in Exchange on-premises mode.
 
     Michel de Rooij
     michel@eightwone.com
@@ -12,11 +12,21 @@
     ENTIRE RISK OF THE USE OR THE RESULTS FROM THE USE OF THIS CODE REMAINS
     WITH THE USER.
 
-    Version 1.31, August 7, 2026
+    Version 1.6.1, August 11, 2026
 
     .DESCRIPTION
-    Invoke-MailboxPermissionCleaner enumerates all UserMailbox recipients in an Exchange
-    on-premises environment.  It operates in two complementary modes:
+    Invoke-MailboxPermissionCleaner enumerates all UserMailbox recipients and supports
+    both Exchange on-premises and Exchange Online in one unified script.
+
+    Environment detection
+    ---------------------
+    At startup, the script detects whether it is running against Exchange on-premises
+    or Exchange Online. Detection is automatic.
+
+    Send As cmdlet routing
+    ----------------------
+    * Exchange on-premises: Get-ADPermission / Remove-ADPermission
+    * Exchange Online    : Get-RecipientPermission / Remove-RecipientPermission
 
     Disabled-owner mode (always active)
     ------------------------------------
@@ -26,12 +36,16 @@
 
     Orphan mode (-Orphan switch)
     ----------------------------
+    Orphan detection/removal is supported only in Exchange on-premises mode.
     For EVERY mailbox (regardless of owner state), any permission entry whose trustee
     resolves to an unresolvable SID-like value (e.g. "S-1-5-21-...") is treated as an
     orphaned permission – the original account no longer exists in AD or Exchange – and
     is automatically removed.  The -FullAccess, -SendAs, and -Calendar switches still
     gate which permission types are inspected; orphan handling is an additional reason
     to remove, not a separate set of cmdlets.
+
+    In Exchange Online mode, specifying -Orphan emits a notice and orphan handling is
+    automatically disabled for that run.
 
     When none of -FullAccess, -SendAs, -SendOnBehalfOf, or -Calendar are specified, the
     script behaves as if all four were specified (backward-compatible default).
@@ -51,16 +65,17 @@
     domain, it automatically calls Set-ADServerSettings -ViewEntireForest $true so
     that all Exchange AD lookups span the entire forest.
 
-    Prerequisites
-    -------------
-    * Must be run from an Exchange Management Shell (EMS) session.
-    * The ActiveDirectory PowerShell module must be available.
+        Prerequisites
+        -------------
+        * Must be run from an Exchange Management Shell (on-prem) or connected
+            Exchange Online PowerShell session (cloud).
+        * The ActiveDirectory PowerShell module is required only in on-prem mode.
     * The account running the script requires Exchange Organization Management or
       equivalent permissions to read and remove mailbox permissions.
 
 .PARAMETER LogPath
     Full path to the CSV log file.  If the file already exists it will be appended to.
-    Defaults to "MailboxPermissionCleaner_<yyyyMMdd_HHmmss>.csv" in the current directory.
+    Defaults to "Invoke-MailboxPermissionCleaner-<yyyyMMdd_HHmmss>.csv" in the current directory.
 
 .PARAMETER ResultSize
     Maximum number of mailboxes returned by Get-Mailbox.  Defaults to 'Unlimited'.
@@ -79,14 +94,16 @@
     Process Calendar folder permissions.  See -FullAccess for default behaviour.
 
 .PARAMETER Orphan
-    Additionally remove any permission entry whose trustee cannot be resolved (i.e.
-    appears as a raw SID such as "S-1-5-21-...") across ALL mailboxes, regardless of
-    whether the mailbox owner's account is disabled.  Combined with the permission-type
-    switches to limit which permission types are inspected for orphans.
+    On-premises only. Additionally remove any permission entry whose trustee cannot be
+    resolved (i.e. appears as a raw SID such as "S-1-5-21-...") across ALL mailboxes,
+    regardless of whether the mailbox owner's account is disabled. Combined with the
+    permission-type switches to limit which permission types are inspected for orphans.
+
+    In Exchange Online mode, this switch is ignored after writing a notice.
 
 .PARAMETER WhatIf
-    Simulates all removal operations without making changes.  Findings are written to
-    the pipeline instead of the log file and can be piped to Out-GridView or Export-Csv.
+    Simulates all removal operations without making changes. Findings are written to
+    the pipeline and also logged to the CSV log file so the WhatIf run is auditable.
 
 .PARAMETER Confirm
     Prompts before each removal operation when ConfirmImpact is High.
@@ -130,12 +147,12 @@
 
 .NOTES
     Author  : Invoke-MailboxPermissionCleaner
-    Version : 1.1.0
-    Requires: Exchange Management Shell, ActiveDirectory module, PowerShell 5.1+
+    Version : 1.6.1
+    Requires: Exchange Management Shell or Exchange Online PowerShell, PowerShell 5.1+
 
     Caching Architecture
     --------------------
-    Four script-scoped hashtables are populated lazily as lookups are performed:
+    Five script-scoped hashtables are populated lazily as lookups are performed:
 
       $script:TrusteeCache    - Key: raw trustee string  -> resolved UPN or $null
       $script:RecipientCache  - Key: identity string     -> Get-Recipient result
@@ -172,8 +189,8 @@
       1. Checks the in-memory cache first.
       2. Calls Get-Recipient -Identity <trustee> (handles alias, DN, LegacyExchangeDN,
          SMTP address).
-      3. Falls back to Get-ADUser with a -Filter on SamAccountName, DistinguishedName,
-         SID, or UserPrincipalName.
+      3. On-prem only: Falls back to Get-ADUser with a -Filter on SamAccountName,
+         DistinguishedName, SID, or UserPrincipalName.
       4. Returns a PSCustomObject with OriginalValue, ResolvedUPN, and IsOrphanSid
          properties.
       5. Stores the result (or sentinel) in the cache.
@@ -181,22 +198,22 @@
     WhatIf / Confirm Implementation
     --------------------------------
     The script declares [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='High')].
-    Every call to Remove-MailboxPermission, Remove-ADPermission, Set-Mailbox, and
-    Remove-MailboxFolderPermission is guarded by an explicit
+    Every call to Remove-MailboxPermission, Remove-ADPermission/
+    Remove-RecipientPermission, Set-Mailbox, and Remove-MailboxFolderPermission is
+    guarded by an explicit
       if ($PSCmdlet.ShouldProcess(...)) { ... }
     check so that -WhatIf suppresses all changes and -Confirm prompts before each one.
-    When -WhatIf is specified, findings are written to the pipeline instead of the log
+    When -WhatIf is specified, findings are written to the pipeline and to the CSV log
     file; the results can be captured, piped to Out-GridView, or exported to CSV.
 #>
 #Requires -Version 5.1
-#Requires -Modules ActiveDirectory
 [CmdletBinding(
     SupportsShouldProcess = $true,
     ConfirmImpact = 'High'
 )]
 param (
     [Parameter()]
-    [string]$LogPath = (Join-Path -Path (Get-Location) -ChildPath ("Invoke-MailboxPermissionCleaner-{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))),
+    [string]$LogPath = (Join-Path -Path (Get-Location) -ChildPath ("Invoke-MailboxPermissionCleaner-{0}.csv" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))),
 
     [Parameter()]
     [string]$ResultSize = 'Unlimited',
@@ -240,10 +257,112 @@ $script:TrusteeDisabledCache = @{}   # resolved UPN -> $true (disabled) | $false
 
 $script:SENTINEL = '__NOT_FOUND__'
 $script:LogEntryCount = 0
+$script:LogBuffer = New-Object System.Collections.Generic.List[object]
+$script:LogBufferSize = 250
+$script:ExchangeEnvironment = $null
+$script:EffectiveOrphan = [bool]$Orphan
+
+#endregion
+
+#region --- Environment detection --------------------------------------------------
+
+function Test-CommandAvailable {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    return $null -ne (Get-Command -Name $Name -ErrorAction SilentlyContinue)
+}
+
+function Get-DetectedExchangeEnvironment {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param ()
+
+    $hasGetRecipientPermission = Test-CommandAvailable -Name 'Get-RecipientPermission'
+    $hasGetAdPermission = Test-CommandAvailable -Name 'Get-ADPermission'
+    $hasGetAdUser = Test-CommandAvailable -Name 'Get-ADUser'
+
+    $exoConnected = $false
+    if (Test-CommandAvailable -Name 'Get-ConnectionInformation') {
+        try {
+            $connections = @(Get-ConnectionInformation -ErrorAction Stop)
+            $exoConnected = @($connections | Where-Object { $_.State -eq 'Connected' }).Count -gt 0
+        }
+        catch {
+            $exoConnected = $false
+        }
+    }
+
+    if ($exoConnected -or ($hasGetRecipientPermission -and -not $hasGetAdPermission)) {
+        return 'ExchangeOnline'
+    }
+
+    if ($hasGetAdPermission -and $hasGetAdUser) {
+        return 'OnPrem'
+    }
+
+    if ($hasGetRecipientPermission) {
+        return 'ExchangeOnline'
+    }
+
+    throw 'Unable to detect Exchange environment. Connect to Exchange Online PowerShell or run in Exchange Management Shell.'
+}
+
+function Initialize-ExchangeEnvironment {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param ()
+
+    $resolvedMode = Get-DetectedExchangeEnvironment
+
+    if ($resolvedMode -eq 'OnPrem') {
+        if (-not (Test-CommandAvailable -Name 'Get-ADPermission')) {
+            throw 'OnPrem mode requires Exchange on-prem cmdlets (Get-ADPermission).'
+        }
+        if (-not (Test-CommandAvailable -Name 'Get-ADUser')) {
+            throw 'OnPrem mode requires the ActiveDirectory module (Get-ADUser).'
+        }
+    }
+    elseif ($resolvedMode -eq 'ExchangeOnline') {
+        if (-not (Test-CommandAvailable -Name 'Get-RecipientPermission')) {
+            throw 'ExchangeOnline mode requires Exchange Online cmdlets (Get-RecipientPermission).'
+        }
+        if (-not (Test-CommandAvailable -Name 'Remove-RecipientPermission')) {
+            throw 'ExchangeOnline mode requires Exchange Online cmdlets (Remove-RecipientPermission).'
+        }
+    }
+
+    return $resolvedMode
+}
 
 #endregion
 
 #region --- Logging ----------------------------------------------------------------
+
+function Flush-LogBuffer {
+    <#
+    .SYNOPSIS
+        Flushes buffered log rows to CSV in a single batch write.
+    #>
+    [CmdletBinding()]
+    param ()
+
+    if ($script:LogBuffer.Count -eq 0) {
+        return
+    }
+
+    try {
+        $script:LogBuffer | Export-Csv -Path $script:LogPath -Append -NoTypeInformation -Encoding UTF8
+        $script:LogBuffer.Clear()
+    }
+    catch {
+        Write-Warning ("Failed to flush log buffer to '{0}': {1}" -f $script:LogPath, $_.Exception.Message)
+    }
+}
 
 function Write-LogEntry {
     <#
@@ -276,16 +395,13 @@ function Write-LogEntry {
 
     $script:LogEntryCount++
 
+    $script:LogBuffer.Add($row) | Out-Null
+    if ($script:LogBuffer.Count -ge $script:LogBufferSize) {
+        Flush-LogBuffer
+    }
+
     if ($WhatIfPreference) {
         Write-Output $row
-    }
-    else {
-        try {
-            $row | Export-Csv -Path $script:LogPath -Append -NoTypeInformation -Encoding UTF8
-        }
-        catch {
-            Write-Warning ("Failed to write log entry to '{0}': {1}" -f $script:LogPath, $_.Exception.Message)
-        }
     }
 
     $verboseArgs = @(
@@ -361,11 +477,11 @@ function Resolve-Trustee {
         $cached = $script:TrusteeCache[$Trustee]
         $result.ResolvedUPN = if ($cached -eq $script:SENTINEL) { $null } else { $cached }
         $result.IsOrphanSid = ($cached -eq $script:SENTINEL) -and (Test-IsOrphanSid -Value $Trustee)
-        Write-Verbose ("      [Resolve-Trustee] Cache hit for '{0}': ResolvedUPN={1}, IsOrphanSid={2}" -f $Trustee, $(if ($result.ResolvedUPN) { $result.ResolvedUPN } else { 'NULL' }), $result.IsOrphanSid)
+        Write-Debug ("      [Resolve-Trustee] Cache hit for '{0}': ResolvedUPN={1}, IsOrphanSid={2}" -f $Trustee, $(if ($result.ResolvedUPN) { $result.ResolvedUPN } else { 'NULL' }), $result.IsOrphanSid)
         return $result
     }
 
-    Write-Verbose ("      [Resolve-Trustee] Cache miss for '{0}' - attempting resolution" -f $Trustee)
+    Write-Debug ("      [Resolve-Trustee] Cache miss for '{0}' - attempting resolution" -f $Trustee)
 
     # Normalize various identity formats to a common lookup format
     $identity = $Trustee
@@ -391,7 +507,7 @@ function Resolve-Trustee {
         $script:TrusteeCache[$Trustee] = $cached  # also store under original key
         $result.ResolvedUPN = if ($cached -eq $script:SENTINEL) { $null } else { $cached }
         $result.IsOrphanSid = ($cached -eq $script:SENTINEL) -and (Test-IsOrphanSid -Value $Trustee)
-        Write-Verbose ("      [Resolve-Trustee] Cache hit (via normalized '{0}') for '{1}': ResolvedUPN={2}" -f $identity, $Trustee, $(if ($result.ResolvedUPN) { $result.ResolvedUPN } else { 'NULL' }))
+        Write-Debug ("      [Resolve-Trustee] Cache hit (via normalized '{0}') for '{1}': ResolvedUPN={2}" -f $identity, $Trustee, $(if ($result.ResolvedUPN) { $result.ResolvedUPN } else { 'NULL' }))
         return $result
     }
 
@@ -414,15 +530,30 @@ function Resolve-Trustee {
     }
 
     if ($recipient) {
-        # Prefer DistinguishedName (which Get-ADUser accepts); fall back to PrimarySmtpAddress
-        # CRITICAL: Ensure DN is converted to string to avoid object-reference cache key issues
-        $resolvedUpn = $recipient.DistinguishedName
-        if ($resolvedUpn) {
-            $resolvedUpn = $resolvedUpn.ToString().Trim()
+        # On-prem: prefer DistinguishedName because AD identity lookups are authoritative.
+        # EXO: prefer SMTP/UPN because no local AD lookups are used.
+        $resolvedUpn = $null
+        if ($script:ExchangeEnvironment -eq 'OnPrem') {
+            $resolvedUpn = $recipient.DistinguishedName
+            if ($resolvedUpn) {
+                $resolvedUpn = $resolvedUpn.ToString().Trim()
+            }
+            if ([string]::IsNullOrEmpty($resolvedUpn) -and $recipient.PrimarySmtpAddress) {
+                $resolvedUpn = $recipient.PrimarySmtpAddress.ToString()
+            }
         }
-        if ([string]::IsNullOrEmpty($resolvedUpn) -and $recipient.PrimarySmtpAddress) {
-            $resolvedUpn = $recipient.PrimarySmtpAddress.ToString()
+        else {
+            if ($recipient.PrimarySmtpAddress) {
+                $resolvedUpn = $recipient.PrimarySmtpAddress.ToString()
+            }
+            elseif ($recipient.WindowsEmailAddress) {
+                $resolvedUpn = $recipient.WindowsEmailAddress.ToString()
+            }
+            elseif ($recipient.UserPrincipalName) {
+                $resolvedUpn = $recipient.UserPrincipalName.ToString()
+            }
         }
+
         if ($resolvedUpn) {
             # Store under both original and normalized keys so future lookups for the same user
             # (regardless of input format) reuse the exact same DN string
@@ -436,7 +567,17 @@ function Resolve-Trustee {
         }
     }
 
-    # --- Attempt 2: Get-ADUser ---
+    if ($script:ExchangeEnvironment -ne 'OnPrem') {
+        Write-Debug ("      [Resolve-Trustee] EXO mode and recipient lookup failed for '{0}' - caching SENTINEL" -f $Trustee)
+        $script:TrusteeCache[$Trustee] = $script:SENTINEL
+        if ($identity -ne $Trustee) {
+            $script:TrusteeCache[$identity] = $script:SENTINEL
+        }
+        $result.IsOrphanSid = Test-IsOrphanSid -Value $Trustee
+        return $result
+    }
+
+    # --- Attempt 2: Get-ADUser (on-prem only) ---
     $adUser = $null
     if ($script:ADUserCache.ContainsKey($identity)) {
         $adUser = $script:ADUserCache[$identity]
@@ -445,7 +586,8 @@ function Resolve-Trustee {
     else {
         try {
             # Try SamAccountName first, then SID, then DN
-            $adUser = Get-ADUser -Filter { SamAccountName -eq $identity } -Properties UserPrincipalName -ErrorAction Stop |
+            $safeIdentity = $identity -replace "'", "''"
+            $adUser = Get-ADUser -Filter "SamAccountName -eq '$safeIdentity'" -Properties UserPrincipalName -ErrorAction Stop |
             Select-Object -First 1
 
             if (-not $adUser) {
@@ -471,7 +613,7 @@ function Resolve-Trustee {
     }
 
     # Unresolved – mark as orphan if value looks like a SID
-    Write-Verbose ("      [Resolve-Trustee] Failed to resolve '{0}' - caching SENTINEL" -f $Trustee)
+    Write-Debug ("      [Resolve-Trustee] Failed to resolve '{0}' - caching SENTINEL" -f $Trustee)
     $script:TrusteeCache[$Trustee] = $script:SENTINEL
     if ($identity -ne $Trustee) {
         $script:TrusteeCache[$identity] = $script:SENTINEL
@@ -551,6 +693,10 @@ function Get-MailboxOwnerADUser {
         [string]$SamAccountName
     )
 
+    if ($script:ExchangeEnvironment -ne 'OnPrem') {
+        return $null
+    }
+
     if ($script:ADUserCache.ContainsKey($SamAccountName)) {
         $cached = $script:ADUserCache[$SamAccountName]
         if ($cached -eq $script:SENTINEL) {
@@ -603,30 +749,56 @@ function Test-TrusteeIsDisabled {
         # [bool]'__NOT_FOUND__' = $true (non-empty string), causing disabled users to be
         # misidentified as SENTINEL and their permissions to be skipped.
         if ($cached -is [bool]) {
-            Write-Verbose ("        [Test-TrusteeIsDisabled] Cache hit for '{0}': IsDisabled={1}" -f $ResolvedUPN, $cached)
+            Write-Debug ("        [Test-TrusteeIsDisabled] Cache hit for '{0}': IsDisabled={1}" -f $ResolvedUPN, $cached)
             return $cached  # $true = disabled, $false = enabled
         }
-        Write-Verbose ("        [Test-TrusteeIsDisabled] Cache hit for '{0}': SENTINEL (not a user)" -f $ResolvedUPN)
+        Write-Debug ("        [Test-TrusteeIsDisabled] Cache hit for '{0}': SENTINEL (not a user)" -f $ResolvedUPN)
         return $false  # Sentinel string — not a user account
     }
 
-    Write-Verbose ("        [Test-TrusteeIsDisabled] Cache miss - querying AD for: {0}" -f $ResolvedUPN)
+    if ($script:ExchangeEnvironment -eq 'OnPrem') {
+        Write-Debug ("        [Test-TrusteeIsDisabled] Cache miss - querying AD for: {0}" -f $ResolvedUPN)
 
-    # Attempt to resolve the UPN to a user account (not groups)
+        # Attempt to resolve the UPN to a user account (not groups)
+        try {
+            $adUser = Get-ADUser -Identity $ResolvedUPN -Properties Enabled -ErrorAction Stop
+
+            # Cache the disabled state
+            $isDisabled = -not $adUser.Enabled
+            $script:TrusteeDisabledCache[$ResolvedUPN] = $isDisabled
+            Write-Debug ("        [Test-TrusteeIsDisabled] Found AD user '{0}' - Enabled: {1}, IsDisabled: {2} [Cached with key: {3}]" -f $adUser.SamAccountName, $adUser.Enabled, $isDisabled, $ResolvedUPN)
+            return $isDisabled
+        }
+        catch {
+            # Not a user (likely a group or doesn't exist as a user)
+            # Cache sentinel so we don't retry the lookup
+            $script:TrusteeDisabledCache[$ResolvedUPN] = $script:SENTINEL
+            Write-Debug ("        [Test-TrusteeIsDisabled] Failed to resolve '{0}' as user account (caching SENTINEL): {1}" -f $ResolvedUPN, $_.Exception.Message)
+            return $false
+        }
+    }
+
+    Write-Debug ("        [Test-TrusteeIsDisabled] Cache miss - querying EXO user state for: {0}" -f $ResolvedUPN)
     try {
-        $adUser = Get-ADUser -Identity $ResolvedUPN -Properties Enabled -ErrorAction Stop
+        $exoUser = Get-User -Identity $ResolvedUPN -ErrorAction Stop
 
-        # Cache the disabled state
-        $isDisabled = -not $adUser.Enabled
-        $script:TrusteeDisabledCache[$ResolvedUPN] = $isDisabled
-        Write-Verbose ("        [Test-TrusteeIsDisabled] Found AD user '{0}' - Enabled: {1}, IsDisabled: {2} [Cached with key: {3}]" -f $adUser.SamAccountName, $adUser.Enabled, $isDisabled, $ResolvedUPN)
-        return $isDisabled
+        if ($null -ne $exoUser.PSObject.Properties['AccountDisabled']) {
+            $isDisabled = [bool]$exoUser.AccountDisabled
+            $script:TrusteeDisabledCache[$ResolvedUPN] = $isDisabled
+            Write-Debug ("        [Test-TrusteeIsDisabled] EXO user state for '{0}' - AccountDisabled: {1}" -f $ResolvedUPN, $isDisabled)
+            return $isDisabled
+        }
+
+        # Property not available in this session or cmdlet output shape; treat as undetermined.
+        $script:TrusteeDisabledCache[$ResolvedUPN] = $script:SENTINEL
+        Write-Warning ("Could not determine disabled state for EXO identity '{0}' because AccountDisabled is unavailable. Treating as enabled for this run." -f $ResolvedUPN)
+        Write-Debug ("        [Test-TrusteeIsDisabled] EXO did not expose AccountDisabled for '{0}' (cached SENTINEL)." -f $ResolvedUPN)
+        return $false
     }
     catch {
-        # Not a user (likely a group or doesn't exist as a user)
-        # Cache sentinel so we don't retry the lookup
         $script:TrusteeDisabledCache[$ResolvedUPN] = $script:SENTINEL
-        Write-Verbose ("        [Test-TrusteeIsDisabled] Failed to resolve '{0}' as user account (caching SENTINEL): {1}" -f $ResolvedUPN, $_.Exception.Message)
+        Write-Warning ("Failed to query EXO disabled state for identity '{0}'. Treating as enabled for this run. Error: {1}" -f $ResolvedUPN, $_.Exception.Message)
+        Write-Debug ("        [Test-TrusteeIsDisabled] Failed EXO lookup for '{0}' (cached SENTINEL): {1}" -f $ResolvedUPN, $_.Exception.Message)
         return $false
     }
 }
@@ -776,25 +948,38 @@ function Remove-SendAsPermissions {
         [bool]$IncludeOrphan = $false
     )
 
-    # Always process to check for disabled trustees, regardless of owner state or orphan mode
+    # Always process to check for disabled trustees, regardless of owner state or orphan mode.
     # Resolve to plain strings to avoid deserialized-object identity errors in implicit remoting.
-    # Get-ADPermission / Remove-ADPermission require a Distinguished Name; they do not resolve SMTP addresses.
     $mailboxSmtp = $Mailbox.PrimarySmtpAddress.ToString()
     $mailboxDn = $Mailbox.DistinguishedName.ToString()
 
     Write-Verbose ("  Processing Send As for: {0}" -f $mailboxSmtp)
 
     try {
-        $adPerms = Get-ADPermission -Identity $mailboxDn -ErrorAction Stop |
-        Where-Object {
-            $_.ExtendedRights -match 'SendAs|Send-As' -and
-            $_.IsInherited -eq $false -and
-            $_.Deny -eq $false -and
-            $_.User -notmatch 'NT AUTHORITY\\SELF'
+        if ($script:ExchangeEnvironment -eq 'OnPrem') {
+            $adPerms = Get-ADPermission -Identity $mailboxDn -ErrorAction Stop |
+            Where-Object {
+                $_.ExtendedRights -match 'SendAs|Send-As' -and
+                $_.IsInherited -eq $false -and
+                $_.Deny -eq $false -and
+                $_.User -notmatch 'NT AUTHORITY\\SELF'
+            }
+        }
+        else {
+            $adPerms = Get-RecipientPermission -Identity $mailboxSmtp -ErrorAction Stop |
+            Where-Object {
+                $_.AccessRights -contains 'SendAs' -and
+                $_.Trustee -notmatch 'NT AUTHORITY\\SELF'
+            }
         }
     }
     catch {
-        Write-Warning ("Get-ADPermission failed for '{0}': {1}" -f $Mailbox.PrimarySmtpAddress, $_.Exception.Message)
+        if ($script:ExchangeEnvironment -eq 'OnPrem') {
+            Write-Warning ("Get-ADPermission failed for '{0}': {1}" -f $Mailbox.PrimarySmtpAddress, $_.Exception.Message)
+        }
+        else {
+            Write-Warning ("Get-RecipientPermission failed for '{0}': {1}" -f $Mailbox.PrimarySmtpAddress, $_.Exception.Message)
+        }
         return
     }
 
@@ -806,7 +991,7 @@ function Remove-SendAsPermissions {
     Write-Verbose ("    Found {0} Send As permission(s) to evaluate." -f @($adPerms).Count)
 
     foreach ($perm in $adPerms) {
-        $trusteeRaw = $perm.User.ToString()
+        $trusteeRaw = if ($script:ExchangeEnvironment -eq 'OnPrem') { $perm.User.ToString() } else { $perm.Trustee.ToString() }
         Write-Verbose ("    Processing Send As - User: {0}" -f $trusteeRaw)
 
         $resolved = Resolve-Trustee -Trustee $trusteeRaw
@@ -836,16 +1021,29 @@ function Remove-SendAsPermissions {
 
         $spDescription = "Remove Send As for '{0}' on mailbox '{1}'" -f $trusteeRaw, $Mailbox.PrimarySmtpAddress
 
-        if ($PSCmdlet.ShouldProcess($spDescription, 'Remove-ADPermission')) {
+        $targetCmdlet = if ($script:ExchangeEnvironment -eq 'OnPrem') { 'Remove-ADPermission' } else { 'Remove-RecipientPermission' }
+        if ($PSCmdlet.ShouldProcess($spDescription, $targetCmdlet)) {
             try {
-                $removeAdPermissionParams = @{
-                    Identity       = $mailboxDn
-                    User           = $trusteeRaw
-                    ExtendedRights = 'Send-As'
-                    Confirm        = $false
-                    ErrorAction    = 'Stop'
+                if ($script:ExchangeEnvironment -eq 'OnPrem') {
+                    $removeAdPermissionParams = @{
+                        Identity       = $mailboxDn
+                        User           = $trusteeRaw
+                        ExtendedRights = 'Send-As'
+                        Confirm        = $false
+                        ErrorAction    = 'Stop'
+                    }
+                    Remove-ADPermission @removeAdPermissionParams
                 }
-                Remove-ADPermission @removeAdPermissionParams
+                else {
+                    $removeRecipientPermissionParams = @{
+                        Identity     = $mailboxSmtp
+                        Trustee      = $trusteeRaw
+                        AccessRights = 'SendAs'
+                        Confirm      = $false
+                        ErrorAction  = 'Stop'
+                    }
+                    Remove-RecipientPermission @removeRecipientPermissionParams
+                }
                 $entry['RemovedAction'] = 'Removed'
                 $entry['Success'] = $true
                 $entry['ErrorMessage'] = ''
@@ -1103,148 +1301,181 @@ function Remove-CalendarPermissions {
 #region --- Main script body -----------------------------------------------------
 
 if ($WhatIfPreference) {
-    Write-Host "Running in WhatIf mode - no changes will be made. Findings will be written to the pipeline."
+    Write-Host "Running in WhatIf mode - no changes will be made. Findings will be written to the pipeline and CSV log."
+    Write-Host ("Log file: {0}" -f $LogPath)
 }
 else {
     Write-Host ("Log file: {0}" -f $LogPath)
 }
 
-# Auto-detect multi-domain forest and enable ViewEntireForest if needed
-Write-Verbose "Checking Active Directory forest topology..."
-try {
-    $adForest = Get-ADForest -ErrorAction Stop
-    if ($adForest.Domains.Count -gt 1) {
-        Write-Verbose ("Forest '{0}' contains {1} domains - enabling ViewEntireForest." -f $adForest.Name, $adForest.Domains.Count)
-        try {
-            Set-ADServerSettings -ViewEntireForest $true -ErrorAction Stop
-            Write-Verbose "ViewEntireForest is now enabled."
-        }
-        catch {
-            Write-Warning ("Failed to set ViewEntireForest: {0}" -f $_.Exception.Message)
-        }
-    }
-    else {
-        Write-Verbose ("Single-domain forest '{0}' - ViewEntireForest not required." -f $adForest.Name)
-    }
+$script:ExchangeEnvironment = Initialize-ExchangeEnvironment
+Write-Host ("Environment mode: {0}" -f $script:ExchangeEnvironment)
+
+if ($script:ExchangeEnvironment -eq 'ExchangeOnline' -and $Orphan) {
+    $script:EffectiveOrphan = $false
+    Write-Warning 'Orphan detection/removal is not supported in Exchange Online mode. -Orphan will be ignored for this run.'
 }
-catch {
-    Write-Warning ("Could not determine forest topology: {0}" -f $_.Exception.Message)
+
+if ($script:ExchangeEnvironment -eq 'OnPrem') {
+    # Auto-detect multi-domain forest and enable ViewEntireForest if needed
+    Write-Verbose "Checking Active Directory forest topology..."
+    try {
+        $adForest = Get-ADForest -ErrorAction Stop
+        if ($adForest.Domains.Count -gt 1) {
+            Write-Verbose ("Forest '{0}' contains {1} domains - enabling ViewEntireForest." -f $adForest.Name, $adForest.Domains.Count)
+            try {
+                Set-ADServerSettings -ViewEntireForest $true -ErrorAction Stop
+                Write-Verbose "ViewEntireForest is now enabled."
+            }
+            catch {
+                Write-Warning ("Failed to set ViewEntireForest: {0}" -f $_.Exception.Message)
+            }
+        }
+        else {
+            Write-Verbose ("Single-domain forest '{0}' - ViewEntireForest not required." -f $adForest.Name)
+        }
+    }
+    catch {
+        Write-Warning ("Could not determine forest topology: {0}" -f $_.Exception.Message)
+    }
 }
 
 Write-Verbose "Retrieving mailboxes..."
 
+$current = 0
 try {
     $getMailboxParams = @{
         ResultSize           = $ResultSize
         RecipientTypeDetails = 'UserMailbox'
         ErrorAction          = 'Stop'
     }
-    $allMailboxes = @(Get-Mailbox @getMailboxParams)
-}
-catch {
-    throw ("Failed to retrieve mailboxes: {0}" -f $_.Exception.Message)
-}
 
-$total = $allMailboxes.Count
-$current = 0
-
-Write-Host ("Found {0} UserMailbox recipients." -f $total)
-
-foreach ($mbx in $allMailboxes) {
-    $current++
-    $progressParams = @{
-        Activity        = 'Invoke-MailboxPermissionCleaner'
-        Status          = ("Processing {0} of {1}: {2}" -f $current, $total, $mbx.PrimarySmtpAddress)
-        PercentComplete = ($current / $total) * 100
-    }
-    Write-Progress @progressParams
-
-    Write-Verbose ("[{0}/{1}] Checking: {2}" -f $current, $total, $mbx.PrimarySmtpAddress)
-
-    # --- Determine if the mailbox owner AD account is disabled ---
-    $ownerSam = $mbx.SamAccountName
-    $ownerDisabled = $false
-    $adUser = $null
-
-    if ([string]::IsNullOrWhiteSpace($ownerSam)) {
-        Write-Verbose ("  No SamAccountName found.")
-    }
-    else {
-        $adUser = Get-MailboxOwnerADUser -SamAccountName $ownerSam
-        if (-not $adUser) {
-            Write-Warning ("Could not retrieve AD account for '{0}' - mailbox will be skipped." -f $ownerSam)
+    foreach ($mbx in (Get-Mailbox @getMailboxParams)) {
+        $current++
+        $progressParams = @{
+            Activity = 'Invoke-MailboxPermissionCleaner'
+            Status   = ("Processing {0}: {1}" -f $current, $mbx.PrimarySmtpAddress)
         }
-        elseif ($adUser.Enabled -eq $false) {
-            $ownerDisabled = $true
-            Write-Verbose ("  Account '{0}' is DISABLED." -f $ownerSam)
+        Write-Progress @progressParams
+
+        Write-Verbose ("[{0}] Checking: {1}" -f $current, $mbx.PrimarySmtpAddress)
+
+        # --- Determine if the mailbox owner AD account is disabled ---
+        $ownerSam = $mbx.SamAccountName
+        $ownerDisabled = $false
+        $adUser = $null
+
+        if ($script:ExchangeEnvironment -eq 'OnPrem') {
+            if ([string]::IsNullOrWhiteSpace($ownerSam)) {
+                Write-Verbose ("  No SamAccountName found.")
+            }
+            else {
+                $adUser = Get-MailboxOwnerADUser -SamAccountName $ownerSam
+                if (-not $adUser) {
+                    Write-Warning ("Could not retrieve AD account for '{0}'. Owner-disabled checks are skipped for this mailbox, but trustee checks still run." -f $ownerSam)
+                }
+                elseif ($adUser.Enabled -eq $false) {
+                    $ownerDisabled = $true
+                    Write-Verbose ("  Account '{0}' is DISABLED." -f $ownerSam)
+                }
+                else {
+                    Write-Verbose ("  Account '{0}' is enabled." -f $ownerSam)
+                }
+            }
         }
         else {
-            Write-Verbose ("  Account '{0}' is enabled." -f $ownerSam)
-        }
-    }
+            $ownerIdentity = $null
+            if ($mbx.UserPrincipalName) {
+                $ownerIdentity = $mbx.UserPrincipalName.ToString()
+            }
+            elseif ($mbx.PrimarySmtpAddress) {
+                $ownerIdentity = $mbx.PrimarySmtpAddress.ToString()
+            }
 
-    # Process all mailboxes to check for disabled trustees and orphaned permissions
-    # Do NOT skip enabled-owner mailboxes – disabled trustees should be detected regardless
+            if ([string]::IsNullOrWhiteSpace($ownerIdentity)) {
+                Write-Verbose '  Could not determine owner identity for EXO disabled-state check.'
+            }
+            else {
+                $ownerDisabled = Test-TrusteeIsDisabled -ResolvedUPN $ownerIdentity
+                Write-Verbose ("  EXO owner '{0}' disabled state: {1}" -f $ownerIdentity, $ownerDisabled)
 
-    # Build the base log entry shared by all permission removals for this mailbox
-    $baseEntry = @{
-        MailboxDisplayName         = $mbx.DisplayName
-        MailboxPrimarySmtpAddress  = $mbx.PrimarySmtpAddress.ToString()
-        MailboxOwnerSamAccountName = if ($ownerSam) { $ownerSam } else { '' }
-        MailboxOwnerUPN            = if ($adUser -and $adUser.UserPrincipalName) { $adUser.UserPrincipalName } else { '' }
-        MailboxRecipientType       = $mbx.RecipientTypeDetails.ToString()
-        TrusteeOriginal            = ''
-        TrusteeResolvedUPN         = ''
-        PermissionType             = ''
-        RemovedAction              = ''
-        Reason                     = 'Disabled mailbox owner account'
-        Success                    = $true
-        ErrorMessage               = ''
-    }
+                $adUser = [PSCustomObject]@{
+                    UserPrincipalName = $ownerIdentity
+                    Enabled           = (-not $ownerDisabled)
+                }
+            }
+        }
 
-    $permissionParams = @{
-        Mailbox         = $mbx
-        BaseEntry       = $baseEntry
-        OwnerIsDisabled = $ownerDisabled
-        Verbose         = ($VerbosePreference -eq [System.Management.Automation.ActionPreference]::Continue)
-    }
+        # Process all mailboxes to check for disabled trustees and orphaned permissions
+        # Do NOT skip enabled-owner mailboxes – disabled trustees should be detected regardless
 
-    if ($FullAccess) {
-        try {
-            Remove-FullAccessPermissions @permissionParams -IncludeOrphan ([bool]$Orphan)
+        # Build the base log entry shared by all permission removals for this mailbox
+        $baseEntry = @{
+            MailboxDisplayName         = $mbx.DisplayName
+            MailboxPrimarySmtpAddress  = $mbx.PrimarySmtpAddress.ToString()
+            MailboxOwnerSamAccountName = if ($ownerSam) { $ownerSam } else { '' }
+            MailboxOwnerUPN            = if ($adUser -and $adUser.UserPrincipalName) { $adUser.UserPrincipalName } else { '' }
+            MailboxRecipientType       = $mbx.RecipientTypeDetails.ToString()
+            TrusteeOriginal            = ''
+            TrusteeResolvedUPN         = ''
+            PermissionType             = ''
+            RemovedAction              = ''
+            Reason                     = 'Disabled mailbox owner account'
+            Success                    = $true
+            ErrorMessage               = ''
         }
-        catch {
-            Write-Warning ("Unexpected error in Remove-FullAccessPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
-        }
-    }
 
-    if ($SendAs) {
-        try {
-            Remove-SendAsPermissions @permissionParams -IncludeOrphan ([bool]$Orphan)
+        $permissionParams = @{
+            Mailbox         = $mbx
+            BaseEntry       = $baseEntry
+            OwnerIsDisabled = $ownerDisabled
+            Verbose         = ($VerbosePreference -eq [System.Management.Automation.ActionPreference]::Continue)
         }
-        catch {
-            Write-Warning ("Unexpected error in Remove-SendAsPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
-        }
-    }
 
-    if ($SendOnBehalfOf) {
-        try {
-            Remove-SendOnBehalfPermissions @permissionParams
+        if ($FullAccess) {
+            try {
+                Remove-FullAccessPermissions @permissionParams -IncludeOrphan $script:EffectiveOrphan
+            }
+            catch {
+                Write-Warning ("Unexpected error in Remove-FullAccessPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
+            }
         }
-        catch {
-            Write-Warning ("Unexpected error in Remove-SendOnBehalfPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
-        }
-    }
 
-    if ($Calendar) {
-        try {
-            Remove-CalendarPermissions @permissionParams -IncludeOrphan ([bool]$Orphan)
+        if ($SendAs) {
+            try {
+                Remove-SendAsPermissions @permissionParams -IncludeOrphan $script:EffectiveOrphan
+            }
+            catch {
+                Write-Warning ("Unexpected error in Remove-SendAsPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
+            }
         }
-        catch {
-            Write-Warning ("Unexpected error in Remove-CalendarPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
+
+        if ($SendOnBehalfOf) {
+            try {
+                Remove-SendOnBehalfPermissions @permissionParams
+            }
+            catch {
+                Write-Warning ("Unexpected error in Remove-SendOnBehalfPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
+            }
+        }
+
+        if ($Calendar) {
+            try {
+                Remove-CalendarPermissions @permissionParams -IncludeOrphan $script:EffectiveOrphan
+            }
+            catch {
+                Write-Warning ("Unexpected error in Remove-CalendarPermissions for '{0}': {1}" -f $mbx.PrimarySmtpAddress, $_.Exception.Message)
+            }
         }
     }
 }
+catch {
+    throw ("Failed while retrieving or processing mailboxes: {0}" -f $_.Exception.Message)
+}
+
+Flush-LogBuffer
+
+Write-Host ("Processed {0} UserMailbox recipients." -f $current)
 
 Write-Progress -Activity 'Invoke-MailboxPermissionCleaner' -Completed
 if ($WhatIfPreference) {
