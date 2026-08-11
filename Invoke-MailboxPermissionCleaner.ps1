@@ -356,7 +356,7 @@ function Flush-LogBuffer {
     }
 
     try {
-        $script:LogBuffer | Export-Csv -Path $script:LogPath -Append -NoTypeInformation -Encoding UTF8
+        $script:LogBuffer | Export-Csv -Path $script:LogPath -Append -NoTypeInformation -Encoding UTF8 -WhatIf:$False
         $script:LogBuffer.Clear()
     }
     catch {
