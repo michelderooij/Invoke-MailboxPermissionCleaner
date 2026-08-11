@@ -150,6 +150,7 @@ If `Get-ADForest` cannot be reached, a warning is written and the script continu
 | `MailboxPrimarySmtpAddress` | Primary SMTP address of the mailbox |
 | `MailboxOwnerSamAccountName` | `sAMAccountName` of the mailbox owner |
 | `MailboxOwnerUPN` | UPN of the mailbox owner |
+| `MailboxOwnerOU` | Owner OU chain derived from owner DistinguishedName (for example `OU=Sales,OU=Users`; empty when unavailable) |
 | `MailboxRecipientType` | Recipient type details (e.g. `UserMailbox`) |
 | `TrusteeOriginal` | Raw trustee string as returned by the permission cmdlet |
 | `TrusteeResolvedIdentity` | Resolved trustee identity (for example DistinguishedName, SMTP address, or UPN; empty if unresolvable) |

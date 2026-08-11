@@ -13,6 +13,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 - Added `-IgnoreDisabledOwner` switch to ignore mailbox owner disabled-state as a removal trigger.
 - Added `TrusteeRecipientTypeDetails` column to output/log rows when trustee recipient type can be resolved.
+- Added `MailboxOwnerOU` column to output/log rows, populated from owner distinguished name OU components when available.
 
 ### Changed
 

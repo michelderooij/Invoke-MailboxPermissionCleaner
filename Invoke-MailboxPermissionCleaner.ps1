@@ -397,20 +397,21 @@ function Write-LogEntry {
     )
 
     $row = [PSCustomObject][ordered]@{
-        Timestamp                  = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-        MailboxDisplayName         = $Entry['MailboxDisplayName']
-        MailboxPrimarySmtpAddress  = $Entry['MailboxPrimarySmtpAddress']
-        MailboxOwnerSamAccountName = $Entry['MailboxOwnerSamAccountName']
-        MailboxOwnerUPN            = $Entry['MailboxOwnerUPN']
-        MailboxRecipientType       = $Entry['MailboxRecipientType']
-        TrusteeOriginal            = $Entry['TrusteeOriginal']
-        TrusteeResolvedIdentity    = $Entry['TrusteeResolvedIdentity']
+        Timestamp                   = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        MailboxDisplayName          = $Entry['MailboxDisplayName']
+        MailboxPrimarySmtpAddress   = $Entry['MailboxPrimarySmtpAddress']
+        MailboxOwnerSamAccountName  = $Entry['MailboxOwnerSamAccountName']
+        MailboxOwnerUPN             = $Entry['MailboxOwnerUPN']
+        MailboxOwnerOU              = $Entry['MailboxOwnerOU']
+        MailboxRecipientType        = $Entry['MailboxRecipientType']
+        TrusteeOriginal             = $Entry['TrusteeOriginal']
+        TrusteeResolvedIdentity     = $Entry['TrusteeResolvedIdentity']
         TrusteeRecipientTypeDetails = $Entry['TrusteeRecipientTypeDetails']
-        PermissionType             = $Entry['PermissionType']
-        RemovedAction              = $Entry['RemovedAction']
-        Reason                     = $Entry['Reason']
-        Success                    = $Entry['Success']
-        ErrorMessage               = $Entry['ErrorMessage']
+        PermissionType              = $Entry['PermissionType']
+        RemovedAction               = $Entry['RemovedAction']
+        Reason                      = $Entry['Reason']
+        Success                     = $Entry['Success']
+        ErrorMessage                = $Entry['ErrorMessage']
     }
 
     $script:LogEntryCount++
@@ -488,10 +489,10 @@ function Resolve-Trustee {
     )
 
     $result = [PSCustomObject]@{
-        OriginalValue = $Trustee
-        ResolvedUPN   = $null
+        OriginalValue               = $Trustee
+        ResolvedUPN                 = $null
         TrusteeRecipientTypeDetails = $null
-        IsOrphanSid   = $false
+        IsOrphanSid                 = $false
     }
 
     if ($script:TrusteeCache.ContainsKey($Trustee)) {
@@ -751,6 +752,39 @@ function Get-MailboxOwnerADUser {
         $script:ADUserCache[$SamAccountName] = $script:SENTINEL
         return $null
     }
+}
+
+#endregion
+
+#region --- Owner metadata helpers ------------------------------------------------
+
+function Get-OUFromDistinguishedName {
+    <#
+    .SYNOPSIS
+        Extracts the OU chain from a distinguished name.
+    .DESCRIPTION
+        Returns a comma-separated OU chain (for example, OU=Sales,OU=Users).
+        Returns an empty string when no OU components are present.
+    .PARAMETER DistinguishedName
+        Distinguished name to parse.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param (
+        [Parameter(Mandatory)]
+        [string]$DistinguishedName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($DistinguishedName)) {
+        return ''
+    }
+
+    $ouParts = @($DistinguishedName -split ',' | Where-Object { $_ -match '^OU=' })
+    if (@($ouParts).Count -eq 0) {
+        return ''
+    }
+
+    return ($ouParts -join ',')
 }
 
 #endregion
@@ -1404,9 +1438,17 @@ try {
         $ownerSam = $mbx.SamAccountName
         $ownerDisabled = $false
         $adUser = $null
+        $ownerOU = ''
 
         if ($IgnoreDisabledOwner) {
             Write-Verbose '  Owner-disabled checks are disabled by -IgnoreDisabledOwner.'
+
+            if ($script:ExchangeEnvironment -eq 'OnPrem' -and -not [string]::IsNullOrWhiteSpace($ownerSam)) {
+                $adUser = Get-MailboxOwnerADUser -SamAccountName $ownerSam
+                if ($adUser -and $adUser.DistinguishedName) {
+                    $ownerOU = Get-OUFromDistinguishedName -DistinguishedName $adUser.DistinguishedName
+                }
+            }
         }
         elseif ($script:ExchangeEnvironment -eq 'OnPrem') {
             if ([string]::IsNullOrWhiteSpace($ownerSam)) {
@@ -1423,6 +1465,10 @@ try {
                 }
                 else {
                     Write-Verbose ("  Account '{0}' is enabled." -f $ownerSam)
+                }
+
+                if ($adUser -and $adUser.DistinguishedName) {
+                    $ownerOU = Get-OUFromDistinguishedName -DistinguishedName $adUser.DistinguishedName
                 }
             }
         }
@@ -1454,19 +1500,20 @@ try {
 
         # Build the base log entry shared by all permission removals for this mailbox
         $baseEntry = @{
-            MailboxDisplayName         = $mbx.DisplayName
-            MailboxPrimarySmtpAddress  = $mbx.PrimarySmtpAddress.ToString()
-            MailboxOwnerSamAccountName = if ($ownerSam) { $ownerSam } else { '' }
-            MailboxOwnerUPN            = if ($adUser -and $adUser.UserPrincipalName) { $adUser.UserPrincipalName } else { '' }
-            MailboxRecipientType       = $mbx.RecipientTypeDetails.ToString()
-            TrusteeOriginal            = ''
-            TrusteeResolvedIdentity    = ''
+            MailboxDisplayName          = $mbx.DisplayName
+            MailboxPrimarySmtpAddress   = $mbx.PrimarySmtpAddress.ToString()
+            MailboxOwnerSamAccountName  = if ($ownerSam) { $ownerSam } else { '' }
+            MailboxOwnerUPN             = if ($adUser -and $adUser.UserPrincipalName) { $adUser.UserPrincipalName } else { '' }
+            MailboxOwnerOU              = $ownerOU
+            MailboxRecipientType        = $mbx.RecipientTypeDetails.ToString()
+            TrusteeOriginal             = ''
+            TrusteeResolvedIdentity     = ''
             TrusteeRecipientTypeDetails = ''
-            PermissionType             = ''
-            RemovedAction              = ''
-            Reason                     = 'Disabled mailbox owner account'
-            Success                    = $true
-            ErrorMessage               = ''
+            PermissionType              = ''
+            RemovedAction               = ''
+            Reason                      = 'Disabled mailbox owner account'
+            Success                     = $true
+            ErrorMessage                = ''
         }
 
         $permissionParams = @{
